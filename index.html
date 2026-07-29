@@ -48,6 +48,13 @@
       <button class="btn-sec" onclick="exportCsv()">匯出 csv</button>
       <span id="msg"></span>
     </div>
+    <div class="controls" style="margin-top:10px;">
+      <span style="color:#6c757d;font-size:13px;">沒有檔案？載入範例：</span>
+      <button class="btn-sec" onclick="loadSample('taipei')">臺北市 116年度</button>
+      <button class="btn-sec" onclick="loadSample('taichung')">臺中市 115年度</button>
+      <button class="btn-sec" onclick="loadSample('kaohsiung')">高雄市 115年度</button>
+      <button class="btn-sec" onclick="loadSample('newtaipei')">新北市 115年度</button>
+    </div>
     <div id="out"></div>
   </div>
 </div>
@@ -455,12 +462,32 @@
         // ── UI ──────────────────────────────────────────────────
         let _rows = [];
         const _fmt = n => n === '' ? '' : (+n).toLocaleString('en-US');
+        // 內建範例（與 repo 同源才能 fetch；PDF 為政府公開之單位預算案）
+        const _SAMPLES = {
+            taipei: { file: 'examples/taipei-116.pdf', label: '臺北市政府主計處 116年度' },
+            taichung: { file: 'examples/taichung-115.pdf', label: '臺中市政府主計處 115年度' },
+            kaohsiung: { file: 'examples/kaohsiung-115.pdf', label: '高雄市政府主計處 115年度（PDFium 引擎）' },
+            newtaipei: { file: 'examples/newtaipei-115.pdf', label: '新北市政府主計處 115年度（PDFium 引擎）' },
+        };
+        async function loadSample(key) {
+            const sp = _SAMPLES[key]; if (!sp) return;
+            const msg = document.getElementById('msg');
+            msg.textContent = `正在下載範例：${sp.label}…`;
+            try {
+                const res = await fetch(sp.file);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                await _parse(new Uint8Array(await res.arrayBuffer()));
+            } catch (e) { msg.textContent = '載入範例失敗：' + e.message; }
+        }
         async function run() {
             const el = document.getElementById('f');
             const msg = document.getElementById('msg');
             if (!el.files.length) { msg.textContent = '請先選擇 PDF'; return; }
+            await _parse(new Uint8Array(await el.files[0].arrayBuffer()));
+        }
+        async function _parse(data) {
+            const msg = document.getElementById('msg');
             msg.textContent = '解析中…';
-            const data = new Uint8Array(await el.files[0].arrayBuffer());
             const pdf = await pdfjsLib.getDocument({ data }).promise;
             _rows = await parseLocalDoc(pdf, (i, n) => msg.textContent = `解析中… ${i}/${n}`);
             let engine = 'pdf.js';
