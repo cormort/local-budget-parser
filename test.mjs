@@ -5,8 +5,8 @@ import { readFile } from 'fs/promises';
 import vm from 'node:vm';
 
 const EXPECT = {
-    '臺北市': { file: 'examples/taipei-116.pdf', agency: '臺北市政府主計處' },
-    '臺中市': { file: 'examples/taichung-115.pdf', agency: '臺中市政府主計處' },
+    '臺北市': { file: 'examples/taipei-116.pdf', agency: '臺北市政府主計處', plans: 4, branches: 14, l1: 20, l2: 53, detail: 97, rows: 192 },
+    '臺中市': { file: 'examples/taichung-115.pdf', agency: '臺中市政府主計處', plans: 7, branches: 5, l1: 17, l2: 79, detail: 156, rows: 300 },
 };
 
 function loadTool(html) {

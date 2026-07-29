@@ -28,6 +28,7 @@
   tr.lv-l1 td { background: #f1f3f5; font-weight: 700; }
   tr.lv-detail td { color: #495057; }
   tr.lv-plan td { background: #fff8e1; font-weight: 700; }
+  tr.lv-case td { background: #fffde7; font-weight: 600; }
   .ok { color: #155724; } .bad { color: #dc3545; font-weight: 700; }
   .tw { max-height: 70vh; overflow: auto; }
 </style>
@@ -180,6 +181,9 @@
                 const cell = { name: [], unit: [], qty: [], price: [], amount: [], desc: [] };
                 for (const w of r.ws) {
                     if (w.x < left) continue;                        // 左側直書標籤
+                    // 頁尾頁碼（"a02004 - 13"／"02-004 - 24"）位於資料區內的欄位帶上，
+                    // 會漏進數量欄；以「編號 - 頁次」樣式整個丟棄
+                    if (/^[0-9a-z][0-9a-z-]{3,8}\s*[-–]\s*\d{1,3}$/i.test(w.s.trim())) continue;
                     if (w.x > head.right) continue;                  // 右側直書標籤
                     const c = colOf(w.x);
                     // 預算數與說明有時併在同一個文字物件裡（實測臺中 "80,000 購置總預算編製…"、
@@ -247,6 +251,16 @@
                         br = { code: bm[1], name: bm[2].trim() };
                         const row = _localRow(plan, br, ln, '分支計畫');
                         out.push(row); l1 = null; acct = null;
+                    } else if (!nm && ln.amount && !ln.unit && !ln.qty && !ln.price && /^\d{2}[-–]/.test(ln.desc)) {
+                        // 工程／資本門型計畫（臺北「一般建築及設備」）在分支之下還有「案」層：
+                        // 左欄空白、只有預算數，案號與名稱寫在「說明」欄（「03-113年個人電腦租賃費」），
+                        // 其下各有一組 3000/3030。案的金額是其下科目的小計
+                        //（實測 448,000 ＝ 600＋112,120＋153,000＋91,560＋90,720 ＝分支總額），
+                        // 故列為獨立層級供閱讀，但不進驗算——當成分支會重複計入（曾誤判），
+                        // 當成明細會把案小計算進上一個科目（實測 4 筆不符皆由此而來）。
+                        const row = _localRow(plan, br, ln, '案別');
+                        row.desc = ln.desc;
+                        out.push(row); l1 = null; acct = null;
                     } else if (ln.amount || ln.unit || ln.qty || ln.price) {
                         // 尚未進入任何分支／科目時出現的金額列，是「計畫層的增減說明」
                         //（提要頁的預算金額＋「較上年度預算數…增加…元。」），不是明細列；
@@ -292,7 +306,11 @@
             // 2) Σ二級 = 一級（同分支、同一級）
             const k1 = r => [r.planCode, r.branchCode, r.l1Code].join('|');
             const l1 = new Map();
-            for (const r of rows) if (r.level === '用途別一級') l1.set(k1(r), { a: n(r.amount), s: 0, r });
+            for (const r of rows) if (r.level === '用途別一級') {
+                // 同分支下同一個一級科目可出現多次（資本門計畫每案各有一組 3000），累加後再比
+                const g = l1.get(k1(r));
+                if (g) g.a += n(r.amount); else l1.set(k1(r), { a: n(r.amount), s: 0, r });
+            }
             for (const r of rows) if (r.level === '用途別二級') { const g = l1.get(k1(r)); if (g) g.s += n(r.amount); }
             for (const g of l1.values()) if (g.s && g.s !== g.a) bad.push(`二級≠一級 ${g.r.l1Code} ${g.r.l1Name}：${_fmt(g.a)} ≠ ${_fmt(g.s)}`);
             // 3) Σ一級 = 分支
@@ -332,7 +350,7 @@
         }
         function render() {
             const bad = reconcile(_rows);
-            const cls = { '計畫說明': 'lv-plan', '分支計畫': 'lv-branch', '用途別一級': 'lv-l1', '用途別二級': 'lv-l2', '明細': 'lv-detail' };
+            const cls = { '計畫說明': 'lv-plan', '案別': 'lv-case', '分支計畫': 'lv-branch', '用途別一級': 'lv-l1', '用途別二級': 'lv-l2', '明細': 'lv-detail' };
             const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
             const body = _rows.map(r => `<tr class="${cls[r.level] || ''}">`
                 + `<td>${esc(r.planCode)}</td><td>${esc(r.planName)}</td>`
