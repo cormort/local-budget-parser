@@ -39,7 +39,7 @@
   <div class="warn">
     <strong>⚠ 本工具僅供輔助核對，不能取代人工審閱——一切數據以政府公佈的預算書 PDF 原文為準。</strong><br>
     金額與科目結構直接取自 PDF 左側表格，並經四層加總驗算（明細→科目→分支→工作計畫）；說明文字為該明細列原文，一對一對應，未做任何推論歸戶。<br>
-    <strong>已知限制</strong>：部分縣市（實測高雄市、新北市）的 PDF 內文字型 pdf.js 無法解讀，本工具讀不到任何數字，會明確報錯而非產出空白表。
+    部分縣市（實測高雄市、新北市）的 PDF 內文字型 pdf.js 無法解讀，此時自動改用 PDFium 引擎重抽（首次需自 CDN 下載約 2MB），解析規則不變。
   </div>
   <div class="card">
     <div class="controls">
@@ -137,9 +137,12 @@
             //（"80,000 購置總預算編製作業手冊…"），那些物件落在金額欄的 x，若一併計入，
             // 眾數會落到金額欄上，反而把整個金額欄推進說明欄（實測臺中 p22 即如此）。
             // 續行的純文字說明才是真正的說明欄左緣。
+            // 只計 2 字以上的 run：右側直書標籤全是單字（x=578 一堆「鄉」「（」…），
+            // 說明行少的頁（統籌計畫首頁）會被它搶走眾數，bound.amount 直接推到 576，
+            // 整個說明欄被當成金額欄（實測新北 p44「495,000元)」因此變成假明細）。
             const cnt = {};
             for (const w of ws)
-                if (w.y < headY - 2 && w.x > hx.amount && !/^[\d,]/.test(w.s.trim()))
+                if (w.y < headY - 2 && w.x > hx.amount && !/^[\d,]/.test(w.s.trim()) && _strip(w.s).length >= 2)
                     cnt[Math.round(w.x)] = (cnt[Math.round(w.x)] || 0) + 1;
             const mode = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0];
             if (mode && mode[1] >= 3) bound.amount = +mode[0] - 2;
@@ -183,17 +186,33 @@
                     if (w.x < left) continue;                        // 左側直書標籤
                     // 頁尾頁碼（"a02004 - 13"／"02-004 - 24"）位於資料區內的欄位帶上，
                     // 會漏進數量欄；以「編號 - 頁次」樣式整個丟棄
-                    if (/^[0-9a-z][0-9a-z-]{3,8}\s*[-–]\s*\d{1,3}$/i.test(w.s.trim())) continue;
+                    if (/^[0-9a-z][0-9a-z-]{2,8}\s*[-–]\s*\d{1,3}$/i.test(w.s.trim())) continue;
                     if (w.x > head.right) continue;                  // 右側直書標籤
                     const c = colOf(w.x);
-                    // 預算數與說明有時併在同一個文字物件裡（實測臺中 "80,000 購置總預算編製…"、
-                    // 高雄 "32,000約僱人員休假旅遊補助費。"），需就地拆開，否則金額讀不到、
-                    // 說明也會連著數字。判準：金額欄的字串以數字開頭、後面接非數字內容。
-                    const sp = c === 'amount' && w.s.trim().match(/^([\d,]+)[\s　]*([^\d\s,].*)$/s);
+                    const t = w.s.trim();
+                    // 說明的清單編號（「1.」「2.」）凸排在說明左緣之外，會落進預算數欄帶
+                    //（高雄 4085 因此多出 amount=1、2 的假明細，驗算差 3）。
+                    // 1~2 位數接「.」不可能是金額，整串撥回說明欄。
+                    if (c === 'amount' && /^\d{1,2}\./.test(t)) { cell.desc.push(t); continue; }
+                    // 說明裡的公文字號跨行時，10 位數字段會落在金額欄帶
+                    //（「新北府原民字第1130004549號函」→ amount=1,130,004,549，一筆假明細
+                    //   把 4020 的加總灌到 24.9 億）。預算數欄 5 位以上一律千分位，
+                    //   無逗號的長數字必是公文號／年度等說明內容，撥回說明欄。
+                    if (c === 'amount' && /^\d{5,}/.test(t) && !t.includes(',')) { cell.desc.push(t); continue; }
+                    // 預算數與說明常併在同一個文字物件裡，需就地拆開，否則金額讀不到。兩型：
+                    //   有空白分隔（"148,000 1.系統維護…"）——說明可以任何字元開頭（含清單編號）
+                    //   無空白黏合（"32,000約僱人員休假旅遊補助費。"）——說明以非數字開頭
+                    const sp = c === 'amount' && (t.match(/^([\d,]+)[\s　]+(.+)$/s) || t.match(/^([\d,]+)([^\d\s,].*)$/s));
                     if (sp) { cell.amount.push(sp[1]); cell.desc.push(sp[2]); continue; }
                     cell[c].push(w.s);
                 }
                 const j = a => a.join('').trim();
+                // 清單編號與後文被切成兩個 run 時（「1」落金額欄帶＋「.全年度7人。」落說明欄），
+                // 列上只有 1~2 位數的「金額」且說明以「.」開頭——不可能是真明細，併回說明。
+                if (!cell.unit.length && !cell.qty.length && !cell.price.length
+                    && /^\d{1,2}$/.test(j(cell.amount)) && /^[.、]/.test(j(cell.desc))) {
+                    cell.desc.unshift(j(cell.amount)); cell.amount = [];
+                }
                 const line = { y: r.y };
                 for (const k of _LOCAL_COLS) line[k] = j(cell[k]);
                 if (_LOCAL_COLS.some(k => line[k])) out.push(line);
@@ -218,18 +237,45 @@
                     const bi = texts0.findIndex(t => t.includes(_LOCAL_TITLE));
                     if (bi > 0 && /^[一-鿿－]{2,20}$/.test(texts0[bi - 1])) _unitAgency = texts0[bi - 1];
                 }
-                // 工作計畫：11 碼代碼與名稱「不同列」——名稱在代碼正下方（同 x），
-                // 且 flat 字序會插入「承辦」等鄰欄文字，故必須用座標取，不能用 flat regex。
-                // （實測臺北 x=133：「32020040101」／下一列同 x「一般行政-行政管理」，
-                //   中間夾著 x=301 的「承辦」、x=463 的「預算」。）
-                const pc = ws.find(w => /^\d{11}$/.test(w.s.trim()));
-                if (pc && (!plan || plan.code !== pc.s.trim())) {
-                    const below = ws.filter(w => Math.abs(w.x - pc.x) < 6 && w.y < pc.y - 2)
-                        .sort((a, b) => b.y - a.y)[0];
-                    const bm = _strip(ws.filter(w => w.x > pc.x + 200).map(w => w.s).join(''))
+                // 工作計畫：11 碼可能是獨立物件（pdf.js／臺北臺中），也可能與欄名黏成
+                // 同一個 run（PDFium 的字距合併：「業務計畫及工作計畫32020110101」，
+                // 高雄新北皆如此），故從任何 run 撈 11 碼。
+                // 名稱不能用「與代碼同 x」找——高雄的代碼 run 起點是欄名的 x（38），
+                // 名稱卻在 130。穩定的錨點是「名稱與編號」那一列：名稱是該列上
+                // 緊鄰其後的中文 run（臺北 133／臺中 151／高雄 130／新北 133 皆成立）。
+                // 預算金額單位兩制：臺北寫「190,179,000元」、高雄新北寫「94,876千元」。
+                // 代碼不全是數字：統籌支撥科目用「8970a010401」這種含英文字母的 11 碼，
+                // 只認 \d{11} 會讓 plan 不更新，統籌各計畫的資料全數掛到前一個計畫底下
+                //（實測新北 7 筆驗算不符全由此而來）。放寬為 11 位英數、首位數字。
+                const pcw = ws.find(w => /\b\d[0-9a-z]{10}\b/i.test(w.s));
+                const pcode = pcw && pcw.s.match(/\b\d[0-9a-z]{10}\b/i)[0];
+                // 新北經常門／資本門各有提要頁：同一計畫（同 code）出現兩次，預算金額
+                // 分別只寫該門的額度（主計業務：經常門 13,710 千元＋資本門 100 千元，
+                // 機關別預算表證實全計畫 13,810 千元）。同 code 再遇到預算金額時累加，
+                // 否則分支加總必與計畫額差一個資本門。其他縣市同計畫僅一個提要頁，不受影響。
+                if (pcode && plan && plan.code === pcode) {
+                    const bm2 = _strip(ws.filter(w => w.x > pcw.x + 250).map(w => w.s).join(''))
+                        .match(/([\d,]+)(千元|元)/);
+                    if (bm2) plan.budget = String((+plan.budget || 0) + +bm2[1].replace(/,/g, '') * (bm2[2] === '千元' ? 1000 : 1));
+                }
+                if (pcode && (!plan || plan.code !== pcode)) {
+                    const ni = texts0.findIndex(t => t.includes('名稱與編號'));
+                    let name = '';
+                    if (ni >= 0) {
+                        const lab = rows0[ni].ws.find(w => _strip(w.s).includes('名稱與編號')) || rows0[ni].ws[0];
+                        const cand = rows0[ni].ws.filter(w => w.x > lab.x + 10 && /[一-鿿]/.test(w.s))
+                            .sort((a, b) => a.x - b.x)[0];
+                        if (cand) name = cand.s.trim();
+                    }
+                    if (!name) {
+                        const below = ws.filter(w => Math.abs(w.x - pcw.x) < 6 && w.y < pcw.y - 2)
+                            .sort((a, b) => b.y - a.y)[0];
+                        name = below ? below.s.trim() : '';
+                    }
+                    const bm = _strip(ws.filter(w => w.x > pcw.x + 250).map(w => w.s).join(''))
                         .match(/([\d,]+)(千元|元)/);
                     plan = {
-                        code: pc.s.trim(), name: below ? below.s.trim() : '',
+                        code: pcode, name,
                         budget: bm ? String(+bm[1].replace(/,/g, '') * (bm[2] === '千元' ? 1000 : 1)) : '',
                     };
                     br = null; l1 = null; acct = null;
@@ -238,6 +284,12 @@
                 if (!head || !plan) continue;
                 for (const ln of _localLines(ws, head)) {
                     const nm = ln.name;
+                    // 「合計」列＝該計畫明細區的總計（每門提要頁後各一列），不是科目也不是明細；
+                    // 當成明細會掛到上一頁最後一個科目（實測新北 2072 因此多 100,000）。
+                    if (_strip(nm) === '合計') {
+                        out.push(_localRow(plan, br, ln, '計畫說明'));
+                        continue;
+                    }
                     // 分支計畫：2 碼後直接接名稱（無空格）；用途別科目：4 碼後有空格
                     const bm = nm.match(/^(\d{2})(?!\d)[\s　]*([^\d\s].*)$/);
                     const am = nm.match(/^(\d{4})[\s　]+(.+)$/);
@@ -327,6 +379,79 @@
             return bad;
         }
 
+        // ── PDFium 後備引擎 ──────────────────────────────────────
+        // 部分縣市（實測高雄市、新北市）的內文字型 pdf.js 解不開（g_font_error），
+        // 表格內一個字都抽不到；同一份 PDFium（Chrome 內建引擎、BSD-3）可完整抽出，
+        // 且座標系與 pdf.js 一致（同一頁表頭 x 兩引擎相同）。故 pdf.js 抽出 0 列時
+        // 動態載入 @embedpdf/pdfium（MIT 封裝，wasm gzip 約 2.0MB），把字元流組成
+        // pdf.js 形狀的偽文件物件，餵給同一個 parseLocalDoc——解析規則一行不變。
+        const _PDFIUM_CDN = 'https://cdn.jsdelivr.net/npm/@embedpdf/pdfium@2.14.4/dist/';
+        let _pdfiumLib = null;
+        async function _loadPdfium() {
+            if (_pdfiumLib) return _pdfiumLib;
+            const mod = await import(_PDFIUM_CDN + 'index.browser.js');
+            _pdfiumLib = await mod.init({ locateFile: f => _PDFIUM_CDN + f });
+            _pdfiumLib.PDFiumExt_Init();
+            return _pdfiumLib;
+        }
+        // 把一頁的 PDFium 字元流合併成 pdf.js 形狀的 items。
+        // 合併規則：同 y（±2）且 x 間距 <14 併成同一個 run——14 會把右對齊金額的尾端
+        // 與說明欄第一個字黏起來（"1,144,270職員休假補助費"），但這與 pdf.js 在其他
+        // 縣市本來就會產生的「預算數＋說明同物件」同型，交由既有拆分規則處理，行為一致。
+        // 側標偵測（單一字元堆疊）也因此正常：直書字元 y 各不相同，不會被併成 run。
+        function _pdfiumPageItems(lib, tp) {
+            const M = lib.pdfium;
+            const n = lib.FPDFText_CountChars(tp);
+            const px = M._malloc(8), py = M._malloc(8);
+            const chars = [];
+            for (let i = 0; i < n; i++) {
+                const u = lib.FPDFText_GetUnicode(tp, i);
+                lib.FPDFText_GetCharOrigin(tp, i, px, py);
+                chars.push({ c: String.fromCharCode(u), x: M.HEAPF64[px / 8], y: M.HEAPF64[py / 8] });
+            }
+            M._free(px); M._free(py);
+            const rows = [];
+            for (const ch of chars) {
+                if (ch.c === '\r' || ch.c === '\n') continue;
+                let r = rows.find(r0 => Math.abs(r0.y - ch.y) <= 2);
+                if (!r) { r = { y: ch.y, cs: [] }; rows.push(r); }
+                r.cs.push(ch);
+            }
+            const items = [];
+            for (const r of rows) {
+                r.cs.sort((a, b) => a.x - b.x);
+                let run = null;
+                for (const ch of r.cs) {
+                    if (run && ch.x - run.end < 14) { run.str += ch.c; run.end = ch.x + 11; }
+                    else { run = { str: ch.c, transform: [0, 0, 0, 0, ch.x, r.y], end: ch.x + 11 }; items.push(run); }
+                }
+            }
+            return items;
+        }
+        // pdf.js 形狀的偽文件物件：parseLocalDoc 只用到 numPages 與 getPage().getTextContent()
+        function _pdfiumFakeDoc(lib, data) {
+            const M = lib.pdfium;
+            const ptr = M._malloc(data.length);
+            M.HEAPU8.set(data, ptr);
+            const doc = lib.FPDF_LoadMemDocument(ptr, data.length, 0);
+            if (!doc) { M._free(ptr); throw new Error('PDFium 開檔失敗'); }
+            return {
+                numPages: lib.FPDF_GetPageCount(doc),
+                async getPage(no) {
+                    return {
+                        async getTextContent() {
+                            const page = lib.FPDF_LoadPage(doc, no - 1);
+                            const tp = lib.FPDFText_LoadPage(page);
+                            const items = _pdfiumPageItems(lib, tp);
+                            lib.FPDFText_ClosePage(tp); lib.FPDF_ClosePage(page);
+                            return { items };
+                        },
+                    };
+                },
+                destroy() { lib.FPDF_CloseDocument(doc); M._free(ptr); },
+            };
+        }
+
         // ── UI ──────────────────────────────────────────────────
         let _rows = [];
         const _fmt = n => n === '' ? '' : (+n).toLocaleString('en-US');
@@ -338,14 +463,29 @@
             const data = new Uint8Array(await el.files[0].arrayBuffer());
             const pdf = await pdfjsLib.getDocument({ data }).promise;
             _rows = await parseLocalDoc(pdf, (i, n) => msg.textContent = `解析中… ${i}/${n}`);
+            let engine = 'pdf.js';
+            if (!_rows.length) {
+                // pdf.js 抽出 0 列 → 字型解不開（高雄市、新北市），切換 PDFium 重抽
+                msg.textContent = '此 PDF 的字型 pdf.js 無法解讀，改用 PDFium 引擎（首次需下載約 2MB）…';
+                try {
+                    const lib = await _loadPdfium();
+                    const fake = _pdfiumFakeDoc(lib, data);
+                    _rows = await parseLocalDoc(fake, (i, n) => msg.textContent = `PDFium 解析中… ${i}/${n}`);
+                    fake.destroy();
+                    engine = 'PDFium';
+                } catch (e) {
+                    msg.textContent = '';
+                    document.getElementById('out').innerHTML = `<p class="bad">PDFium 後備引擎載入失敗：${e.message}</p>`;
+                    return;
+                }
+            }
             if (!_rows.length) {
                 msg.textContent = '';
                 document.getElementById('out').innerHTML =
-                    '<p class="bad">讀不到任何資料。若此 PDF 在瀏覽器中可正常複製文字，'
-                    + '多半是內文字型 pdf.js 無法解讀（實測高雄市、新北市即如此），並非版面不符。</p>';
+                    '<p class="bad">兩個引擎都讀不到資料——此 PDF 可能不含「歲出計畫說明提要與各項費用明細表」，或版面與實測縣市差異過大。</p>';
                 return;
             }
-            msg.textContent = `完成：${_rows.length} 列（機關：${_unitAgency || '未偵測'}）`;
+            msg.textContent = `完成：${_rows.length} 列（機關：${_unitAgency || '未偵測'}｜引擎：${engine}）`;
             render();
         }
         function render() {

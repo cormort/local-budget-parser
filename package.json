@@ -4,6 +4,11 @@
   "private": true,
   "description": "地方政府單位預算「歲出計畫說明提要與各項費用明細表」PDF 解析工具（純前端單檔；此 package.json 僅供回歸測試使用）",
   "type": "module",
-  "scripts": { "test": "node test.mjs" },
-  "devDependencies": { "pdfjs-dist": "2.10.377" }
+  "scripts": {
+    "test": "node test.mjs"
+  },
+  "devDependencies": {
+    "@embedpdf/pdfium": "^2.14.4",
+    "pdfjs-dist": "2.10.377"
+  }
 }
