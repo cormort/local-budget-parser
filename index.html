@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>地方政府單位預算「歲出計畫說明提要與各項費用明細表」解析工具</title>
+<style>
+  body { font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; margin: 0; background: #f5f7fa; color: #212529; }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 20px; }
+  h1 { color: #0d47a1; font-size: 22px; }
+  .warn { background: #fff8e1; border: 1px solid #ffe082; border-radius: 6px; padding: 12px 16px; font-size: 14px; line-height: 1.7; }
+  .card { background: #fff; border-radius: 8px; padding: 18px; margin-top: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button { padding: 7px 14px; border: 0; border-radius: 4px; cursor: pointer; font-size: 14px; }
+  .btn-main { background: #1565c0; color: #fff; } .btn-sec { background: #6c757d; color: #fff; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #dee2e6; padding: 5px 7px; vertical-align: top; }
+  thead th { background: #1565c0; color: #fff; position: sticky; top: 0; }
+  td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  tr.lv-branch td { background: #e3f2fd; font-weight: 700; }
+  tr.lv-l1 td { background: #f1f3f5; font-weight: 700; }
+  tr.lv-detail td { color: #495057; }
+  .ok { color: #155724; } .bad { color: #dc3545; font-weight: 700; }
+  .tw { max-height: 70vh; overflow: auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>地方政府單位預算 歲出計畫說明提要與各項費用明細表 解析工具</h1>
+  <div class="warn">
+    <strong>⚠ 本工具僅供輔助核對，不能取代人工審閱——一切數據以政府公佈的預算書 PDF 原文為準。</strong><br>
+    金額與科目結構直接取自 PDF 左側表格，並經四層加總驗算（明細→科目→分支→工作計畫）；說明文字為該明細列原文，一對一對應，未做任何推論歸戶。<br>
+    <strong>已知限制</strong>：部分縣市（實測高雄市、新北市）的 PDF 內文字型 pdf.js 無法解讀，本工具讀不到任何數字，會明確報錯而非產出空白表。
+  </div>
+  <div class="card">
+    <div class="controls">
+      <input type="file" id="f" accept=".pdf">
+      <button class="btn-main" onclick="run()">解析</button>
+      <button class="btn-sec" onclick="exportCsv()">匯出 csv</button>
+      <span id="msg"></span>
+    </div>
+    <div id="out"></div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.min.js"></script>
+<script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js';
+        let _unitAgency = '';
+        if (typeof globalThis !== 'undefined') globalThis.detectedAgency = () => _unitAgency;
+
+        const _ACCT = { '1000': '人事費', '1005': '民意代表待遇', '1010': '政務人員待遇', '1015': '法定編制人員待遇', '1020': '約聘僱人員待遇', '1025': '技工及工友待遇', '1030': '獎金', '1035': '其他給與', '1040': '加班費', '1045': '退休退職給付', '1050': '退休離職儲金', '1055': '保險', '1060': '調待準備', '2000': '業務費', '2003': '教育訓練費', '2006': '水電費', '2009': '通訊費', '2012': '土地租金', '2015': '權利使用費', '2018': '資訊服務費', '2021': '其他業務租金', '2024': '稅捐及規費', '2027': '保險費', '2030': '兼職費', '2033': '約用人員酬金', '2036': '按日按件計資酬金', '2039': '委辦費', '2042': '國際組織會費', '2045': '國內組織會費', '2048': '軍事裝備及設施', '2051': '物品', '2054': '一般事務費', '2057': '給養費', '2060': '軍事裝備設施養護費', '2063': '房屋建築養護費', '2066': '器具養護費', '2069': '設施及機械設備養護費', '2072': '國內旅費', '2075': '大陸地區旅費', '2078': '國外旅費', '2081': '運費', '2084': '短程車資', '2087': '機要費', '2090': '機密費', '2093': '特別費', '3000': '設備及投資', '3005': '土地', '3010': '房屋建築及設備費', '3015': '公共建設及設施費', '3020': '機械設備費', '3025': '運輸設備費', '3030': '資訊軟硬體設備費', '3035': '雜項設備費', '3040': '權利', '3045': '投資', '4000': '獎補助費', '4005': '對直轄市政府之補助', '4010': '對各縣市政府之補助', '4020': '地方政府對下級政府之補助', '4025': '政府機關間之補助', '4030': '對特種基金之補助', '4035': '對外之捐助', '4040': '對國內團體之捐助', '4045': '對私校之獎助', '4050': '對學生之獎助', '4055': '社會保險負擔', '4060': '對公保軍保退撫基金之補助及挹注', '4065': '社會福利津貼及濟助', '4070': '公費就養及醫療補助', '4075': '差額補貼', '4080': '損失及賠償', '4085': '獎勵及慰問', '4090': '其他補助及捐助', '5000': '債務費', '5005': '債務利息', '5010': '手續費', '6000': '預備金', '6010': '第二預備金', '6015': '其他準備金' };
+
+        const _strip = s => s.replace(/[\s　]/g, '');
+
+        // 依 y 鄰近把字分列（列內依 x 排序）。ws 需已依 y 由大到小排序。
+        function _groupRows(ws) {
+            const rows = [];
+            for (const w of ws) {
+                let r = rows[rows.length - 1];
+                if (!r || Math.abs(r.y - w.y) > 6) { r = { y: w.y, ws: [] }; rows.push(r); }
+                r.ws.push(w);
+            }
+            for (const r of rows) r.ws.sort((a, b) => a.x - b.x);
+            return rows;
+        }
+
+        // 列內去空白拼接後的第 idx 個字，落在哪個 item → 回傳該 item 的 x
+        function _xOfChar(rws, idx) {
+            let n = 0;
+            for (const w of rws) {
+                const len = _strip(w.s).length;
+                if (idx < n + len) return w.x;
+                n += len;
+            }
+            return null;
+        }
+
+        // ══════ 地方政府：歲出計畫說明提要與各項費用明細表 ══════
+        // 與中央的「歲出計畫提要及分支計畫概況表」是不同的表，故另寫解析器而非塞進中央那套：
+        //   工作計畫 11 碼（中央 10 碼）｜多出 單位／數量／單價 三欄，金額欄名為「預算數」
+        //   單位是「元」不是千元｜頁面兩側有直書標籤（x≈21／578，緊鄰 x≈35 的科目欄）
+        //   說明是逐明細列的短語（「印製本處單位預算書。」），一對一綁在該列——
+        //   中央那整套歸戶規則鏈（名稱＋金額、加總、順序界限、孤兒句）在此完全用不到。
+        // 實測樣本：臺北市 116 年度、臺中市 115 年度。
+        const _LOCAL_TITLE = '歲出計畫說明提要與各項費用明細表';
+        const _LOCAL_COLS = ['name', 'unit', 'qty', 'price', 'amount', 'desc'];
+        const _LOCAL_HEAD = {
+            name: '分支計畫及用途別科目', unit: '單位', qty: '數量', price: '單價', amount: '預算數', desc: '說明',
+        };
+
+        // 量測一頁的欄界。欄界取「相鄰表頭 x 的中點」：數值欄是右對齊、說明欄左對齊、
+        // 單位欄置中，各欄的值相對欄名的偏移方向都不同（實測臺北 單價欄名 315／值 320~344、
+        // 預算數欄名 390／值 410~427、說明欄名 484／值 450），用欄名±固定偏移必然切錯，
+        // 中點則讓每欄的值都落在正確區間（臺北 127/223/282/352/437、臺中 138/228/278/334/415）。
+        function _localPageHead(ws) {
+            const rows = _groupRows(ws);
+            const texts = rows.map(r => _strip(r.ws.map(w => w.s).join('')));
+            // 找表頭列。科目欄名有兩種寫法：首頁「分支計畫及用途別科目」、續頁只寫「用途別科目」
+            // （實測臺中 p16 為前者、p23 為後者），兩者都要認，只認前者會整頁跳過而靜默漏資料。
+            const ti = texts.findIndex(t => t.includes('用途別科目'));
+            if (ti < 0) return null;
+            // 表頭橫跨兩列：實測臺中「分支計畫及用途別科目」在 y=732，其餘欄名在 y=725，
+            // 差 7pt 超過分列容差，只看單一列會漏掉後五欄。故以 ±12 取整個表頭帶再依 x 拼接。
+            const band = ws.filter(w => Math.abs(w.y - rows[ti].y) <= 12).sort((a, b) => a.x - b.x);
+            const bt = _strip(band.map(w => w.s).join(''));
+            const hx = {};
+            for (const k of _LOCAL_COLS) {
+                const at = bt.indexOf(_LOCAL_HEAD[k]);
+                if (at >= 0) hx[k] = _xOfChar(band, at);
+            }
+            // 科目欄名有兩種寫法：首頁「分支計畫及用途別科目」、續頁只寫「用途別科目」
+            // （實測臺中 p16 為前者、p23 為後者）。只認前者會整頁跳過而靜默漏資料。
+            if (hx.name == null) {
+                const at = bt.indexOf('用途別科目');
+                if (at >= 0) hx.name = _xOfChar(band, at);
+            }
+            if (hx.name == null || hx.amount == null) return null;
+            const bound = {};
+            for (let i = 0; i < _LOCAL_COLS.length - 1; i++) {
+                const a = hx[_LOCAL_COLS[i]], b = hx[_LOCAL_COLS[i + 1]];
+                if (a != null && b != null) bound[_LOCAL_COLS[i]] = (a + b) / 2;
+            }
+            const headY = Math.min(...band.map(w => w.y));
+            // 說明欄左緣改用內文眾數，不用欄名中點：欄名「說明」置中於欄內（臺中 474），
+            // 內文卻左對齊在 417，中點 421 會把說明整段掃進預算數欄
+            //（實測切出 "76,622,040編制人員待遇。"）。內文左對齊且重複數十次，訊號乾淨。
+            // 取眾數時只算「不以數字開頭」的字：預算數與說明常併在同一個文字物件裡
+            //（"80,000 購置總預算編製作業手冊…"），那些物件落在金額欄的 x，若一併計入，
+            // 眾數會落到金額欄上，反而把整個金額欄推進說明欄（實測臺中 p22 即如此）。
+            // 續行的純文字說明才是真正的說明欄左緣。
+            const cnt = {};
+            for (const w of ws)
+                if (w.y < headY - 2 && w.x > hx.amount && !/^[\d,]/.test(w.s.trim()))
+                    cnt[Math.round(w.x)] = (cnt[Math.round(w.x)] || 0) + 1;
+            const mode = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0];
+            if (mode && mode[1] >= 3) bound.amount = +mode[0] - 2;
+            // 兩側直書標籤（機關／計畫名逐字直排）緊鄰科目欄，須排除：
+            // 實測臺北側標 x=21 而科目 x=35，僅差 14pt，用固定門檻很脆弱，
+            // 改以「表頭最左字再往左半個欄寬」為界（臺北 59→約 30、臺中 71→約 36）。
+            // 兩側直書標籤（機關／計畫名逐字直排）緊鄰表格，左右都要擋。
+            // 不用表頭位置推邊界——科目欄名有「分支計畫及用途別科目」與「用途別科目」兩種長度，
+            // 置中後 x 相差 22pt（實測臺中 71 vs 93），推出的界線會把 x=45 的科目代碼當成側標濾掉。
+            // 改用側標本身的特徵：直書＝同一個 x 上堆疊大量「單一字元」的物件。
+            // 實測臺北側標 x=21／578、臺中 31／554，各有 9~20 個單字；表格內的單字（數量欄的
+            // 「1」「8」、單位欄的「年」）不會在同一 x 累積到 5 個以上。
+            // 只在資料區（表頭列以下）偵測：提要頁的左側另有一組內層直書標籤
+            //（實測臺北「歲出計畫說明」在 x=41），它位於表頭之上、不會侵入資料列，
+            // 若一併計入會取到 41 而把 x=35 的科目代碼當成側標濾掉（實測 4 頁的科目全數消失）。
+            const single = {};
+            for (const w of ws) if (w.s.trim().length === 1 && w.y < headY - 2) {
+                const k = Math.round(w.x); single[k] = (single[k] || 0) + 1;
+            }
+            const stacks = Object.entries(single).filter(([, c]) => c >= 5).map(([x]) => +x);
+            const ls = stacks.filter(x => x < hx.name), rs = stacks.filter(x => hx.desc != null && x > hx.desc);
+            return {
+                hx, bound, headY,
+                left: ls.length ? Math.max(...ls) + 6 : hx.name - (bound.name - hx.name) / 2,
+                right: rs.length ? Math.min(...rs) - 6 : Infinity,
+            };
+        }
+
+        // 把一頁的字組成資料列：{name, unit, qty, price, amount, desc}
+        function _localLines(ws, head) {
+            const { bound, left, headY } = head;
+            const colOf = x => {
+                for (let i = 0; i < _LOCAL_COLS.length - 1; i++) if (x < bound[_LOCAL_COLS[i]]) return _LOCAL_COLS[i];
+                return 'desc';
+            };
+            const out = [];
+            for (const r of _groupRows(ws)) {
+                if (r.y >= headY - 2) continue;                       // 表頭列以上＝頁首
+                const cell = { name: [], unit: [], qty: [], price: [], amount: [], desc: [] };
+                for (const w of r.ws) {
+                    if (w.x < left) continue;                        // 左側直書標籤
+                    if (w.x > head.right) continue;                  // 右側直書標籤
+                    const c = colOf(w.x);
+                    // 預算數與說明有時併在同一個文字物件裡（實測臺中 "80,000 購置總預算編製…"、
+                    // 高雄 "32,000約僱人員休假旅遊補助費。"），需就地拆開，否則金額讀不到、
+                    // 說明也會連著數字。判準：金額欄的字串以數字開頭、後面接非數字內容。
+                    const sp = c === 'amount' && w.s.trim().match(/^([\d,]+)[\s　]*([^\d\s,].*)$/s);
+                    if (sp) { cell.amount.push(sp[1]); cell.desc.push(sp[2]); continue; }
+                    cell[c].push(w.s);
+                }
+                const j = a => a.join('').trim();
+                const line = { y: r.y };
+                for (const k of _LOCAL_COLS) line[k] = j(cell[k]);
+                if (_LOCAL_COLS.some(k => line[k])) out.push(line);
+            }
+            return out;
+        }
+
+        const _LOCAL_NUM = /^-?[\d,]+$/;
+        async function parseLocalDoc(pdf, onProgress) {
+            const out = [];
+            let plan = null, br = null, l1 = null, acct = null;
+            _unitAgency = '';
+            for (let i = 1; i <= pdf.numPages; i++) {
+                if (onProgress) onProgress(i, pdf.numPages);
+                const tc = await (await pdf.getPage(i)).getTextContent();
+                const flat = tc.items.map(it => it.str).join('').replace(/[\s　]/g, '');
+                if (!flat.includes(_LOCAL_TITLE) || flat.includes('目次')) continue;
+                const ws = tc.items.map(it => ({ x: it.transform[4], y: it.transform[5], s: it.str }))
+                    .filter(w => w.s.trim() !== '').sort((a, b) => b.y - a.y);
+                const rows0 = _groupRows(ws), texts0 = rows0.map(r => _strip(r.ws.map(w => w.s).join('')));
+                if (!_unitAgency) {
+                    const bi = texts0.findIndex(t => t.includes(_LOCAL_TITLE));
+                    if (bi > 0 && /^[一-鿿－]{2,20}$/.test(texts0[bi - 1])) _unitAgency = texts0[bi - 1];
+                }
+                // 工作計畫：11 碼代碼與名稱「不同列」——名稱在代碼正下方（同 x），
+                // 且 flat 字序會插入「承辦」等鄰欄文字，故必須用座標取，不能用 flat regex。
+                // （實測臺北 x=133：「32020040101」／下一列同 x「一般行政-行政管理」，
+                //   中間夾著 x=301 的「承辦」、x=463 的「預算」。）
+                const pc = ws.find(w => /^\d{11}$/.test(w.s.trim()));
+                if (pc && (!plan || plan.code !== pc.s.trim())) {
+                    const below = ws.filter(w => Math.abs(w.x - pc.x) < 6 && w.y < pc.y - 2)
+                        .sort((a, b) => b.y - a.y)[0];
+                    const bm = _strip(ws.filter(w => w.x > pc.x + 200).map(w => w.s).join(''))
+                        .match(/([\d,]+)(千元|元)/);
+                    plan = {
+                        code: pc.s.trim(), name: below ? below.s.trim() : '',
+                        budget: bm ? String(+bm[1].replace(/,/g, '') * (bm[2] === '千元' ? 1000 : 1)) : '',
+                    };
+                    br = null; l1 = null; acct = null;
+                }
+                const head = _localPageHead(ws);
+                if (!head || !plan) continue;
+                for (const ln of _localLines(ws, head)) {
+                    const nm = ln.name;
+                    // 分支計畫：2 碼後直接接名稱（無空格）；用途別科目：4 碼後有空格
+                    const bm = nm.match(/^(\d{2})(?!\d)[\s　]*([^\d\s].*)$/);
+                    const am = nm.match(/^(\d{4})[\s　]+(.+)$/);
+                    if (am) {
+                        const code = am[1], name = _ACCT[code] || am[2].trim();
+                        const row = _localRow(plan, br, ln, code.endsWith('000') ? '用途別一級' : '用途別二級');
+                        if (code.endsWith('000')) { l1 = { code, name }; row.l1Code = code; row.l1Name = name; }
+                        else { row.l1Code = l1 ? l1.code : ''; row.l1Name = l1 ? l1.name : ''; row.l2Code = code; row.l2Name = name; }
+                        out.push(row); acct = row;
+                    } else if (bm) {
+                        br = { code: bm[1], name: bm[2].trim() };
+                        const row = _localRow(plan, br, ln, '分支計畫');
+                        out.push(row); l1 = null; acct = null;
+                    } else if (ln.amount || ln.unit || ln.qty || ln.price) {
+                        // 明細列：掛在目前科目之下
+                        const row = _localRow(plan, br, ln, '明細');
+                        if (acct) { row.l1Code = acct.l1Code; row.l1Name = acct.l1Name; row.l2Code = acct.l2Code; row.l2Name = acct.l2Name; }
+                        out.push(row);
+                    } else if (ln.desc && out.length) {
+                        out[out.length - 1].desc += ln.desc;          // 說明折行接回
+                    }
+                }
+            }
+            return out;
+        }
+        function _localRow(plan, br, ln, level) {
+            return {
+                planCode: plan.code, planName: plan.name, planBudget: plan.budget,
+                branchCode: br ? br.code : '', branchName: br ? br.name : '',
+                l1Code: '', l1Name: '', l2Code: '', l2Name: '', level,
+                amount: _LOCAL_NUM.test(ln.amount) ? ln.amount.replace(/,/g, '') : '',
+                unit: ln.unit, qty: ln.qty, price: ln.price.replace(/,/g, ''), desc: ln.desc,
+            };
+        }
+
+        // 四層加總驗算：明細→科目→分支→工作計畫。UI 與回歸測試共用同一份，
+        // 測試不得自行複寫（複寫必然與實際行為漂移）。
+        function reconcile(rows) {
+            const bad = [];
+            const n = v => +v || 0;
+            // 1) Σ明細 = 其所屬科目（明細緊接在科目之後，遇到下一個科目或分支即換組）
+            let cur = null, acc = 0, cnt = 0;
+            const closeGroup = () => {
+                if (cur && cnt && acc !== n(cur.amount))
+                    bad.push(`明細≠科目 ${cur.l2Code || cur.l1Code} ${cur.l2Name || cur.l1Name}：${_fmt(cur.amount)} ≠ ${_fmt(acc)}`);
+                acc = 0; cnt = 0;
+            };
+            for (const r of rows) {
+                if (r.level === '明細') { acc += n(r.amount); cnt++; continue; }
+                closeGroup();
+                cur = (r.level === '用途別一級' || r.level === '用途別二級') ? r : null;
+            }
+            closeGroup();
+            // 2) Σ二級 = 一級（同分支、同一級）
+            const k1 = r => [r.planCode, r.branchCode, r.l1Code].join('|');
+            const l1 = new Map();
+            for (const r of rows) if (r.level === '用途別一級') l1.set(k1(r), { a: n(r.amount), s: 0, r });
+            for (const r of rows) if (r.level === '用途別二級') { const g = l1.get(k1(r)); if (g) g.s += n(r.amount); }
+            for (const g of l1.values()) if (g.s && g.s !== g.a) bad.push(`二級≠一級 ${g.r.l1Code} ${g.r.l1Name}：${_fmt(g.a)} ≠ ${_fmt(g.s)}`);
+            // 3) Σ一級 = 分支
+            const k2 = r => [r.planCode, r.branchCode].join('|');
+            const br = new Map();
+            for (const r of rows) if (r.level === '分支計畫') br.set(k2(r), { a: n(r.amount), s: 0, r });
+            for (const r of rows) if (r.level === '用途別一級') { const g = br.get(k2(r)); if (g) g.s += n(r.amount); }
+            for (const g of br.values()) if (g.s && g.s !== g.a) bad.push(`一級≠分支 ${g.r.branchCode} ${g.r.branchName}：${_fmt(g.a)} ≠ ${_fmt(g.s)}`);
+            // 4) Σ分支 = 工作計畫預算金額
+            const pl = new Map();
+            for (const r of rows) if (r.planBudget) pl.set(r.planCode, { a: n(r.planBudget), s: 0, r });
+            for (const r of rows) if (r.level === '分支計畫') { const g = pl.get(r.planCode); if (g) g.s += n(r.amount); }
+            for (const g of pl.values()) if (g.s && g.s !== g.a) bad.push(`分支≠計畫 ${g.r.planCode} ${g.r.planName}：${_fmt(g.a)} ≠ ${_fmt(g.s)}`);
+            return bad;
+        }
+
+        // ── UI ──────────────────────────────────────────────────
+        let _rows = [];
+        const _fmt = n => n === '' ? '' : (+n).toLocaleString('en-US');
+        async function run() {
+            const el = document.getElementById('f');
+            const msg = document.getElementById('msg');
+            if (!el.files.length) { msg.textContent = '請先選擇 PDF'; return; }
+            msg.textContent = '解析中…';
+            const data = new Uint8Array(await el.files[0].arrayBuffer());
+            const pdf = await pdfjsLib.getDocument({ data }).promise;
+            _rows = await parseLocalDoc(pdf, (i, n) => msg.textContent = `解析中… ${i}/${n}`);
+            if (!_rows.length) {
+                msg.textContent = '';
+                document.getElementById('out').innerHTML =
+                    '<p class="bad">讀不到任何資料。若此 PDF 在瀏覽器中可正常複製文字，'
+                    + '多半是內文字型 pdf.js 無法解讀（實測高雄市、新北市即如此），並非版面不符。</p>';
+                return;
+            }
+            msg.textContent = `完成：${_rows.length} 列（機關：${_unitAgency || '未偵測'}）`;
+            render();
+        }
+        function render() {
+            const bad = reconcile(_rows);
+            const cls = { '分支計畫': 'lv-branch', '用途別一級': 'lv-l1', '用途別二級': 'lv-l2', '明細': 'lv-detail' };
+            const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+            const body = _rows.map(r => `<tr class="${cls[r.level] || ''}">`
+                + `<td>${esc(r.planCode)}</td><td>${esc(r.planName)}</td>`
+                + `<td>${esc(r.branchCode)}</td><td>${esc(r.branchName)}</td>`
+                + `<td>${esc(r.l2Code || r.l1Code)}</td><td>${esc(r.l2Name || r.l1Name)}</td>`
+                + `<td>${esc(r.unit)}</td><td class="num">${esc(r.qty)}</td><td class="num">${_fmt(r.price)}</td>`
+                + `<td class="num">${_fmt(r.amount)}</td><td>${esc(r.desc)}</td></tr>`).join('');
+            document.getElementById('out').innerHTML =
+                (bad.length ? `<p class="bad">⚠ 四層加總驗算有 ${bad.length} 處不符：<br>${bad.slice(0, 10).map(esc).join('<br>')}</p>`
+                    : '<p class="ok">✅ 四層加總驗算全數通過（明細→科目→分支→工作計畫）</p>')
+                + `<div class="tw"><table><thead><tr><th>工作計畫編號</th><th>工作計畫</th><th>分支計畫編號</th><th>分支計畫</th>`
+                + `<th>用途別科目代碼</th><th>用途別科目</th><th>單位</th><th>數量</th><th>單價</th><th>預算數</th><th>說明</th>`
+                + `</tr></thead><tbody>${body}</tbody></table></div>`;
+        }
+        function exportCsv() {
+            if (!_rows.length) return;
+            const head = ['工作計畫編號', '工作計畫', '分支計畫編號', '分支計畫', '用途別科目代碼', '用途別科目', '單位', '數量', '單價', '預算數', '說明'];
+            const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+            const csv = '\ufeff' + [head, ..._rows.map(r => [r.planCode, r.planName, r.branchCode, r.branchName,
+                r.l2Code || r.l1Code, r.l2Name || r.l1Name, r.unit, r.qty, r.price, r.amount, r.desc])]
+                .map(row => row.map(q).join(',')).join('\r\n');
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+            a.download = '歲出計畫說明提要與各項費用明細表.csv'; a.click();
+        }
+</script>
+</body>
+</html>
