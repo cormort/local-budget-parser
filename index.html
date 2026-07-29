@@ -13,13 +13,21 @@
   .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
   button { padding: 7px 14px; border: 0; border-radius: 4px; cursor: pointer; font-size: 14px; }
   .btn-main { background: #1565c0; color: #fff; } .btn-sec { background: #6c757d; color: #fff; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table { border-collapse: collapse; font-size: 13px; min-width: 1180px; }
+  /* 欄寬要給足，否則中文會被擠成一字一行；空間不夠時整表橫向捲動，不壓縮欄位 */
+  th:nth-child(1), td:nth-child(1), th:nth-child(3), td:nth-child(3),
+  th:nth-child(5), td:nth-child(5), th:nth-child(7), td:nth-child(7) { white-space: nowrap; }
+  th:nth-child(2), td:nth-child(2) { min-width: 130px; }
+  th:nth-child(4), td:nth-child(4) { min-width: 120px; }
+  th:nth-child(6), td:nth-child(6) { min-width: 120px; }
+  th:nth-child(11), td:nth-child(11) { min-width: 300px; }
   th, td { border: 1px solid #dee2e6; padding: 5px 7px; vertical-align: top; }
   thead th { background: #1565c0; color: #fff; position: sticky; top: 0; }
   td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
   tr.lv-branch td { background: #e3f2fd; font-weight: 700; }
   tr.lv-l1 td { background: #f1f3f5; font-weight: 700; }
   tr.lv-detail td { color: #495057; }
+  tr.lv-plan td { background: #fff8e1; font-weight: 700; }
   .ok { color: #155724; } .bad { color: #dc3545; font-weight: 700; }
   .tw { max-height: 70vh; overflow: auto; }
 </style>
@@ -240,8 +248,10 @@
                         const row = _localRow(plan, br, ln, '分支計畫');
                         out.push(row); l1 = null; acct = null;
                     } else if (ln.amount || ln.unit || ln.qty || ln.price) {
-                        // 明細列：掛在目前科目之下
-                        const row = _localRow(plan, br, ln, '明細');
+                        // 尚未進入任何分支／科目時出現的金額列，是「計畫層的增減說明」
+                        //（提要頁的預算金額＋「較上年度預算數…增加…元。」），不是明細列；
+                        // 混為明細會讓四層驗算把它算進科目底下。
+                        const row = _localRow(plan, br, ln, (br || acct) ? '明細' : '計畫說明');
                         if (acct) { row.l1Code = acct.l1Code; row.l1Name = acct.l1Name; row.l2Code = acct.l2Code; row.l2Name = acct.l2Name; }
                         out.push(row);
                     } else if (ln.desc && out.length) {
@@ -322,7 +332,7 @@
         }
         function render() {
             const bad = reconcile(_rows);
-            const cls = { '分支計畫': 'lv-branch', '用途別一級': 'lv-l1', '用途別二級': 'lv-l2', '明細': 'lv-detail' };
+            const cls = { '計畫說明': 'lv-plan', '分支計畫': 'lv-branch', '用途別一級': 'lv-l1', '用途別二級': 'lv-l2', '明細': 'lv-detail' };
             const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
             const body = _rows.map(r => `<tr class="${cls[r.level] || ''}">`
                 + `<td>${esc(r.planCode)}</td><td>${esc(r.planName)}</td>`
