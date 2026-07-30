@@ -1,1 +1,4 @@
 node_modules/
+.DS_Store
+# 另一個獨立的 repo（cormort/my-github-pages）clone 在此目錄下，與本專案無關
+my-github-pages/
