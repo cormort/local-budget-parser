@@ -409,7 +409,11 @@
         hx,
         bound,
         headY,
-        left: ls.length ? Math.max(...ls) + 6 : hx.name - (bound.name - hx.name) / 2,
+        // 偵測不到側標時不可用表頭位置回推左界：續頁欄名只寫「用途別科目」（x=84），
+        // 推出的界線 56 會把 x=35 的科目代碼整欄濾掉，該頁科目與明細全數退化成
+        //「計畫說明」（實測新北社會局 p165 第一預備金、p331 一般建築及設備）。
+        // left 的唯一職責是擋直書側標，沒偵測到側標就沒有要擋的東西。
+        left: ls.length ? Math.max(...ls) + 6 : -Infinity,
         right: rs.length ? Math.min(...rs) - 6 : Infinity
       };
     }
@@ -489,7 +493,16 @@
     }
     
     const _LOCAL_NUM = /^-?[\d,]+$/;
-    
+    // 11 碼數字，或統籌支撥的「8970a010401」（第 5 碼為英文字母）。
+    // 不接受「10 碼數字＋字尾字母」——那是公文字號（1140761123A）的形狀。
+    const _PLAN_CODE = /\b(?:\d{11}|\d{4}[a-z]\d{6})\b/i;
+    // 計畫表頭帶：「業務計畫及工作計畫」或「名稱與編號」標籤列上下 16pt 之內。
+    function _planHeaderBand(ws, rows, texts) {
+      const ys = texts.map((t, i) => /業務計畫及工作計畫|名稱與編號/.test(t) ? rows[i].y : null)
+        .filter(y => y !== null);
+      return ys.length ? ws.filter(w => ys.some(y => Math.abs(w.y - y) <= 16)) : [];
+    }
+
     function _localRow(plan, br, ln, level) {
       return {
         planCode: plan.code,
@@ -589,8 +602,12 @@
           }
         }
         
-        const pcw = ws.find(w => /\b\d[0-9a-z]{10}\b/i.test(w.s));
-        const pcode = pcw && pcw.s.match(/\b\d[0-9a-z]{10}\b/i)[0];
+        // 工作計畫代碼只能在「業務計畫及工作計畫／名稱與編號」表頭帶內撈：從整頁任意
+        // run 撈 11 碼，說明欄的公文字號（新北社會局「1140761123A」「1130401415H」）
+        // 會被當成新計畫，其後數十頁明細連同 br/l1/acct 全部改掛假計畫。
+        // 續頁沒有計畫表頭 → 找不到代碼 → 沿用上一頁的 plan（本來就是這個行為）。
+        const pcw = _planHeaderBand(ws, rows0, texts0).find(w => _PLAN_CODE.test(w.s));
+        const pcode = pcw && pcw.s.match(_PLAN_CODE)[0];
         
         if (pcode && plan && plan.code === pcode) {
           const bm2 = _strip(ws.filter(w => w.x > pcw.x + 250).map(w => w.s).join('')).match(/([\d,]+)(千元|元)/);
@@ -855,8 +872,9 @@
         }
       }
       
+      // 不用 `g.s &&` 跳過 Σ=0：一級底下一個二級都沒有，本身就是解析失敗的徵兆
       for (const g of l1.values()) {
-        if (g.s && g.s !== g.a) {
+        if (g.s !== g.a) {
           bad.push({
             type: '二級≠一級',
             plan: g.r.planName,
@@ -887,7 +905,7 @@
       }
       
       for (const g of brs.values()) {
-        if (g.s && g.s !== g.a) {
+        if (g.s !== g.a) {
           bad.push({
             type: '一級≠分支',
             plan: g.r.planName,
@@ -902,24 +920,28 @@
         }
       }
       
+      // 沒有分支層的計畫（第一預備金、一般建築及設備、統籌支撥各計畫，實測 18 個）
+      // 改比 Σ一級——不能用 `g.s &&` 跳過，那會讓「整頁科目欄被誤濾成計畫說明」
+      // 這類錯誤靜默通過（分支數 0 → Σ 0 → 不檢查）。
       const pl = new Map();
       for (const r of rows) {
         if (r.planBudget) {
-          pl.set(r.planCode, { a: n(r.planBudget), s: 0, r });
+          pl.set(r.planCode, { a: n(r.planBudget), s: 0, nb: 0, l1: 0, r });
         }
       }
       
       for (const r of rows) {
-        if (r.level === '分支計畫') {
-          const g = pl.get(r.planCode);
-          if (g) g.s += n(r.amount);
-        }
+        const g = pl.get(r.planCode);
+        if (!g) continue;
+        if (r.level === '分支計畫') { g.s += n(r.amount); g.nb++; }
+        else if (r.level === '用途別一級') g.l1 += n(r.amount);
       }
       
       for (const g of pl.values()) {
-        if (g.s && g.s !== g.a) {
+        if (!g.nb) g.s = g.l1;
+        if (g.s !== g.a) {
           bad.push({
-            type: '分支≠計畫',
+            type: g.nb ? '分支≠計畫' : '一級≠計畫',
             plan: g.r.planName,
             branch: '',
             code: g.r.planCode,

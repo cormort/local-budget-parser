@@ -22,9 +22,9 @@ const EXPECT = {
         agency: '臺中市政府主計處',
         plans: 7,
         branches: 5,
-        l1: 17,
-        l2: 79,
-        detail: 123,
+        l1: 22,
+        l2: 89,
+        detail: 144,
         rows: 267,
     },
     // 以下兩份的內文字型 pdf.js 無法解讀，改走 PDFium 後備引擎。
@@ -36,9 +36,9 @@ const EXPECT = {
         agency: '高雄市政府主計處',
         plans: 4,
         branches: 8,
-        l1: 18,
-        l2: 72,
-        detail: 115,
+        l1: 19,
+        l2: 73,
+        detail: 116,
         rows: 220,
     },
     '新北市': {
@@ -47,10 +47,49 @@ const EXPECT = {
         agency: '新北市政府主計處',
         plans: 11,
         branches: 6,
-        l1: 10,
-        l2: 38,
-        detail: 72,
+        l1: 21,
+        l2: 50,
+        detail: 89,
         rows: 177,
+    },
+    // 主管單位預算（社會局＋所屬 5 機關，341 頁）。說明欄有大量公文字號，是
+    //「工作計畫代碼只能取自表頭帶」這條規則的實證：放寬到整頁搜尋時，
+    // 1140761123A 等公文字號會變成假計畫，其後數十頁明細全部改掛到假計畫下。
+    '新北市政府社會局': {
+        file: 'examples/newtaipei-social-115.pdf',
+        engine: 'pdfium',
+        agency: '新北市政府社會局',
+        plans: 15,
+        branches: 37,
+        l1: 68,
+        l2: 269,
+        detail: 1161,
+        rows: 1555,
+        extra(rows, errors) {
+            const sum = rs => rs.reduce((t, r) => t + (+r.amount || 0), 0);
+            for (const code of ['1140761123A', '1130401415H', '1140012435D']) {
+                if (rows.some(r => r.planCode === code)) {
+                    errors.push(`公文字號誤判為工作計畫：${code}`);
+                }
+            }
+            const own = ['61111100301', '62111100101', '62111100201',
+                '63111100201', '63111109801', '72111100201'];
+            for (const code of own) {
+                if (!rows.some(r => r.planCode === code)) {
+                    errors.push(`缺少工作計畫：${code}`);
+                }
+            }
+            // 1020 的明細橫跨第 93 頁以後的續頁，是「續頁只承接、不新建計畫」的實證
+            addMismatch(errors, '1020 約聘僱人員待遇明細合計', 258_082_464,
+                sum(rows.filter(r => r.level === '明細' && r.planCode === '62111100101'
+                    && r.branchCode === '01' && r.l2Code === '1020')));
+            // 預算書提要：主管歲出總額 = 各計畫預算金額之和；社會局本身為前 6 個計畫
+            const pb = new Map(rows.filter(r => r.planBudget).map(r => [r.planCode, +r.planBudget]));
+            addMismatch(errors, '主管歲出總額', 32_512_125_000,
+                [...pb.values()].reduce((a, b) => a + b, 0));
+            addMismatch(errors, '社會局歲出總額', 29_414_144_000,
+                own.reduce((a, c) => a + (pb.get(c) || 0), 0));
+        },
     },
 };
 
@@ -192,9 +231,10 @@ async function runBaselineCase(name, want, html) {
 
     const errors = [];
     for (const [key, expected] of Object.entries(want)) {
-        if (key === 'file' || key === 'engine') continue;
+        if (key === 'file' || key === 'engine' || key === 'extra') continue;
         addMismatch(errors, key, expected, got[key]);
     }
+    if (want.extra) want.extra(rows, errors);
 
     // 新版共同規則：總經費列若存在，必須全部標示 excluded=true。
     const totalCostRows = rows.filter(r => r.level === '總經費');
