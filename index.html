@@ -268,7 +268,11 @@
   <script>
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js';
     
-    let _unitAgency = '', _rows = [], _issues = [], _repairs = [];
+    let _unitAgency = '';
+    let _rows = [];
+    let _issues = [];
+    let _repairs = [];
+    
     if (typeof globalThis !== 'undefined') globalThis.detectedAgency = () => _unitAgency;
     
     const _ACCT = {
@@ -513,8 +517,7 @@
         
         if (!flat.includes(_LOCAL_TITLE) || flat.includes('目次')) continue;
         
-        const ws = tc.items
-          .map(it => ({ x: it.transform[4], y: it.transform[5], s: it.str }))
+        const ws = tc.items.map(it => ({ x: it.transform[4], y: it.transform[5], s: it.str }))
           .filter(w => w.s.trim())
           .sort((a, b) => b.y - a.y);
           
@@ -531,9 +534,7 @@
         
         if (pcode && plan && plan.code === pcode) {
           const bm2 = _strip(ws.filter(w => w.x > pcw.x + 250).map(w => w.s).join('')).match(/([\d,]+)(千元|元)/);
-          if (bm2) {
-            plan.budget = String(_num(plan.budget) + _num(bm2[1]) * (bm2[2] === '千元' ? 1000 : 1));
-          }
+          if (bm2) plan.budget = String(_num(plan.budget) + _num(bm2[1]) * (bm2[2] === '千元' ? 1000 : 1));
         }
         
         if (pcode && (!plan || plan.code !== pcode)) {
@@ -549,12 +550,7 @@
             name = below ? below.s.trim() : '';
           }
           const bm = _strip(ws.filter(w => w.x > pcw.x + 250).map(w => w.s).join('')).match(/([\d,]+)(千元|元)/);
-          
-          plan = {
-            code: pcode,
-            name,
-            budget: bm ? String(_num(bm[1]) * (bm[2] === '千元' ? 1000 : 1)) : ''
-          };
+          plan = { code: pcode, name, budget: bm ? String(_num(bm[1]) * (bm[2] === '千元' ? 1000 : 1)) : '' };
           br = null;
           l1 = null;
           acct = null;
@@ -781,6 +777,7 @@
       
       const k1 = r => [r.planCode, r.branchCode, r.l1Code].join('|');
       const l1 = new Map();
+      
       for (const r of rows) {
         if (r.level === '用途別一級') {
           const g = l1.get(k1(r));
@@ -814,6 +811,7 @@
       
       const k2 = r => [r.planCode, r.branchCode].join('|');
       const brs = new Map();
+      
       for (const r of rows) {
         if (r.level === '分支計畫') brs.set(k2(r), { a: n(r.amount), s: 0, r });
       }
@@ -939,10 +937,12 @@
       const ptr = M._malloc(data.length);
       M.HEAPU8.set(data, ptr);
       const doc = lib.FPDF_LoadMemDocument(ptr, data.length, 0);
+      
       if (!doc) {
         M._free(ptr);
         throw Error('PDFium 開檔失敗');
       }
+      
       return {
         numPages: lib.FPDF_GetPageCount(doc),
         async getPage(no) {
@@ -1054,11 +1054,18 @@
     }
     
     function esc(s) {
-      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[c]));
     }
     
     function render() {
       _issues = reconcile(_rows);
+      
       const cls = {
         '計畫說明': 'lv-plan',
         '案別': 'lv-case',
@@ -1077,7 +1084,9 @@
         reconLine = '<p class="ok">✅ 四層加總驗算全數通過（明細→科目→分支→工作計畫）</p>';
       }
       
-      if (_repairs.length) reconLine += `<p class="note">ℹ 已自動修復 ${_repairs.length} 筆疑似欄位黏連金額；匯出資料會保留「原始預算數」供複核。</p>`;
+      if (_repairs.length) {
+        reconLine += `<p class="note">ℹ 已自動修復 ${_repairs.length} 筆疑似欄位黏連金額；匯出資料會保留「原始預算數」供複核。</p>`;
+      }
       
       const getOpts = (l, pick, vf, tf) => {
         const m = new Map();
@@ -1093,8 +1102,8 @@
       const brOpts = getOpts('branch', r => r.branchCode && r.branchName, r => r.branchName, r => r.branchName);
       const acctOpts = getOpts('acct', r => r.l1Code || r.l2Code, r => r.l2Code || r.l1Code, r => `${r.l2Code || r.l1Code} ${r.l2Name || r.l1Name}`);
       const levelOpts = getOpts('level', r => r.level, r => r.level, r => r.level);
-      
       const F = _filter;
+      
       const sel = (k, label, opts, cur) => `<label>${label}：<select onchange="_onFilter('${k}',this.value)"><option value="">全部</option>${opts.map(o => `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.t)}</option>`).join('')}</select></label>`;
       const search = `<label>說明搜尋：<input value="${esc(F.q)}" placeholder="輸入關鍵字後按 Enter" oninput="_filter.q=this.value" onkeydown="if(event.key==='Enter')render()"></label>`;
       const clear = (F.plan || F.branch || F.acct || F.level || F.q) ? `<button class="btn-sec" onclick="_filter.plan=_filter.branch=_filter.acct=_filter.level=_filter.q='';render()" style="padding:5px 12px">清除</button>` : '';
@@ -1105,12 +1114,52 @@
       const total = leaves.reduce((s, r) => s + _num(r.amount), 0);
       const totalRow = `<tr class="lv-total"><td colspan="9">合計（目前篩選：${leaves.length}筆本年度明細；總經費列不計）</td><td class="num">${_fmt(total)}</td><td></td></tr>`;
       
-      const body = view.map(r => `<tr class="${cls[r.level] || ''}"><td>${esc(r.planCode)}</td><td>${esc(r.planName)}</td><td>${esc(r.branchCode)}</td><td>${esc(r.branchName)}</td><td>${esc(r.l2Code || r.l1Code)}</td><td>${esc(r.l2Name || r.l1Name)}</td><td>${esc(r.unit)}</td><td class="num">${esc(r.qty)}</td><td class="num">${_fmt(r.price)}</td><td class="num" title="${r.repaired ? '原始擷取：' + _fmt(r.originalAmount) : ''}">${_fmt(r.amount)}${r.repaired ? ' *' : ''}</td><td>${esc(r.desc)}</td></tr>`).join('');
+      const body = view.map(r => `
+        <tr class="${cls[r.level] || ''}">
+          <td>${esc(r.planCode)}</td>
+          <td>${esc(r.planName)}</td>
+          <td>${esc(r.branchCode)}</td>
+          <td>${esc(r.branchName)}</td>
+          <td>${esc(r.l2Code || r.l1Code)}</td>
+          <td>${esc(r.l2Name || r.l1Name)}</td>
+          <td>${esc(r.unit)}</td>
+          <td class="num">${esc(r.qty)}</td>
+          <td class="num">${_fmt(r.price)}</td>
+          <td class="num" title="${r.repaired ? '原始擷取：' + _fmt(r.originalAmount) : ''}">${_fmt(r.amount)}${r.repaired ? ' *' : ''}</td>
+          <td>${esc(r.desc)}</td>
+        </tr>
+      `).join('');
       
-      document.getElementById('out').innerHTML = reconLine + filter + `<div class="tw"><table><thead><tr><th>工作計畫編號</th><th>工作計畫</th><th>分支計畫編號</th><th>分支計畫</th><th>用途別科目代碼</th><th>用途別科目</th><th>單位</th><th>數量</th><th>單價</th><th>預算數</th><th>說明</th></tr></thead><tbody>${totalRow}${body}</tbody></table></div>`;
+      document.getElementById('out').innerHTML = reconLine + filter + `
+        <div class="tw">
+          <table>
+            <thead>
+              <tr>
+                <th>工作計畫編號</th>
+                <th>工作計畫</th>
+                <th>分支計畫編號</th>
+                <th>分支計畫</th>
+                <th>用途別科目代碼</th>
+                <th>用途別科目</th>
+                <th>單位</th>
+                <th>數量</th>
+                <th>單價</th>
+                <th>預算數</th>
+                <th>說明</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${totalRow}
+              ${body}
+            </tbody>
+          </table>
+        </div>
+      `;
       
       const tbl = document.querySelector('.tw table');
-      if (tbl && tbl.tHead) tbl.style.setProperty('--head-h', tbl.tHead.getBoundingClientRect().height + 'px');
+      if (tbl && tbl.tHead) {
+        tbl.style.setProperty('--head-h', tbl.tHead.getBoundingClientRect().height + 'px');
+      }
     }
     
     function _exportRows() {
@@ -1119,9 +1168,17 @@
     
     function exportData(kind) {
       if (!_rows.length) return;
+      
       const head = ['工作計畫編號', '工作計畫', '分支計畫編號', '分支計畫', '用途別科目代碼', '用途別科目', '層級', '單位', '數量', '單價', '預算數', '原始預算數', '自動修復', 'PDF頁碼', '說明'];
       const view = _exportRows();
-      const arr = r => [r.planCode, r.planName, r.branchCode, r.branchName, r.l2Code || r.l1Code, r.l2Name || r.l1Name, r.level, r.unit, r.qty, r.price, r.amount === '' ? '' : +r.amount, r.originalAmount ? +r.originalAmount : '', r.repaired ? '是' : '', r.page, r.desc];
+      const arr = r => [
+        r.planCode, r.planName, r.branchCode, r.branchName,
+        r.l2Code || r.l1Code, r.l2Name || r.l1Name,
+        r.level, r.unit, r.qty, r.price,
+        r.amount === '' ? '' : +r.amount,
+        r.originalAmount ? +r.originalAmount : '',
+        r.repaired ? '是' : '', r.page, r.desc
+      ];
       const fname = '歲出計畫說明提要與各項費用明細表';
       
       if (kind === 'xlsx') {
@@ -1142,6 +1199,7 @@
         content = JSON.stringify(view.map(r => Object.fromEntries(head.map((h, i) => [h, arr(r)[i]]))), null, 2);
         mime = 'application/json';
       }
+      
       download(content, fname + '.' + kind, mime);
     }
     
@@ -1149,6 +1207,7 @@
       const head = ['類型', '工作計畫', '分支計畫', '代碼', '名稱', '表列數', '明細加總', '差異', 'PDF頁碼'];
       const arr = x => [x.type, x.plan, x.branch, x.code, x.name, x.listed, x.sum, x.diff, x.page];
       const wb = XLSX.utils.book_new();
+      
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ..._issues.map(arr)]), '驗算差異');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(_repairs), '自動修復');
       XLSX.writeFile(wb, '歲出解析驗算差異.xlsx');
