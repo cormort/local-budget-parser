@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>地方政府單位預算「歲出計畫說明提要與各項費用明細表」解析工具</title>
   <style>
     body {
@@ -68,10 +68,6 @@
     .btn-exp {
       background: #28a745;
       color: #fff;
-    }
-
-    .btn-exp:hover {
-      background: #218838;
     }
 
     .ok {
@@ -200,11 +196,6 @@
       font-weight: 600;
     }
 
-    .lv-total-cost td {
-      background: #f3e5f5;
-      color: #6a1b9a;
-    }
-
     .lv-total td {
       background: #1565c0;
       color: #fff;
@@ -226,6 +217,26 @@
       font-size: 12px;
       color: #6c757d;
     }
+
+    .total-tip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 17px;
+      height: 17px;
+      margin-left: 6px;
+      border-radius: 50%;
+      background: #7b1fa2;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: help;
+      vertical-align: middle;
+    }
+
+    .has-total-cost {
+      border-bottom: 2px dotted #7b1fa2;
+    }
   </style>
 </head>
 <body>
@@ -233,8 +244,8 @@
     <h1>地方政府單位預算 歲出計畫說明提要與各項費用明細表 解析工具</h1>
     
     <div class="warn">
-      <strong>⚠ 本工具僅供輔助核對，不能取代人工審閱，一切數據以政府公布的預算書 PDF 原文為準。</strong><br>
-      本版排除「總工程費／總經費」區塊，不將全期計畫總額重複計入本年度預算；並辨識合法千分位金額後黏接的2位數案號，另以科目表列數保守修復少數欄位黏連金額。部分 PDF 若 pdf.js 無法解讀，會自動改用 PDFium。
+      <strong>⚠ 本工具僅供輔助核對，不能取代人工審閱，一切數據以政府公布的預算書PDF原文為準。</strong><br>
+      總工程費／總經費改以案別本年度金額旁的紫色ⓘ提示呈現，不另占資料列，也不納入本年度合計及四層驗算。
     </div>
     
     <div class="card">
@@ -268,30 +279,33 @@
   <script>
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js';
     
-    let _unitAgency = '';
-    let _rows = [];
-    let _issues = [];
-    let _repairs = [];
+    let _unitAgency = '', _rows = [], _issues = [], _repairs = [];
     
-    if (typeof globalThis !== 'undefined') globalThis.detectedAgency = () => _unitAgency;
+    if (typeof globalThis !== 'undefined') {
+      globalThis.detectedAgency = () => _unitAgency;
+    }
     
     const _ACCT = {
-      '1000': '人事費', '1005': '民意代表待遇', '1010': '政務人員待遇', '1015': '法定編制人員待遇', '1020': '約聘僱人員待遇',
-      '1025': '技工及工友待遇', '1030': '獎金', '1035': '其他給與', '1040': '加班費', '1045': '退休退職給付',
-      '1050': '退休離職儲金', '1055': '保險', '1060': '調待準備', '2000': '業務費', '2003': '教育訓練費',
-      '2006': '水電費', '2009': '通訊費', '2012': '土地租金', '2015': '權利使用費', '2018': '資訊服務費',
-      '2021': '其他業務租金', '2024': '稅捐及規費', '2027': '保險費', '2030': '兼職費', '2033': '約用人員酬金',
-      '2036': '按日按件計資酬金', '2039': '委辦費', '2042': '國際組織會費', '2045': '國內組織會費', '2048': '軍事裝備及設施',
-      '2051': '物品', '2054': '一般事務費', '2057': '給養費', '2060': '軍事裝備設施養護費', '2063': '房屋建築養護費',
-      '2066': '器具養護費', '2069': '設施及機械設備養護費', '2072': '國內旅費', '2075': '大陸地區旅費', '2078': '國外旅費',
-      '2081': '運費', '2084': '短程車資', '2087': '機要費', '2090': '機密費', '2093': '特別費', '3000': '設備及投資',
-      '3005': '土地', '3010': '房屋建築及設備費', '3015': '公共建設及設施費', '3020': '機械設備費', '3025': '運輸設備費',
-      '3030': '資訊軟硬體設備費', '3035': '雜項設備費', '3040': '權利', '3045': '投資', '4000': '獎補助費',
-      '4005': '對直轄市政府之補助', '4010': '對各縣市政府之補助', '4020': '地方政府對下級政府之補助', '4025': '政府機關間之補助',
-      '4030': '對特種基金之補助', '4035': '對外之捐助', '4040': '對國內團體之捐助', '4045': '對私校之獎助', '4050': '對學生之獎助',
-      '4055': '社會保險負擔', '4060': '對公保軍保退撫基金之補助及挹注', '4065': '社會福利津貼及濟助', '4070': '公費就養及醫療補助',
-      '4075': '差額補貼', '4080': '損失及賠償', '4085': '獎勵及慰問', '4090': '其他補助及捐助', '5000': '債務費',
-      '5005': '債務利息', '5010': '手續費', '6000': '預備金', '6010': '第二預備金', '6015': '其他準備金'
+      '1000': '人事費', '1005': '民意代表待遇', '1010': '政務人員待遇', '1015': '法定編制人員待遇', 
+      '1020': '約聘僱人員待遇', '1025': '技工及工友待遇', '1030': '獎金', '1035': '其他給與', 
+      '1040': '加班費', '1045': '退休退職給付', '1050': '退休離職儲金', '1055': '保險', 
+      '1060': '調待準備', '2000': '業務費', '2003': '教育訓練費', '2006': '水電費', 
+      '2009': '通訊費', '2012': '土地租金', '2015': '權利使用費', '2018': '資訊服務費', 
+      '2021': '其他業務租金', '2024': '稅捐及規費', '2027': '保險費', '2030': '兼職費', 
+      '2033': '約用人員酬金', '2036': '按日按件計資酬金', '2039': '委辦費', '2042': '國際組織會費', 
+      '2045': '國內組織會費', '2048': '軍事裝備及設施', '2051': '物品', '2054': '一般事務費', 
+      '2057': '給養費', '2060': '軍事裝備設施養護費', '2063': '房屋建築養護費', '2066': '器具養護費', 
+      '2069': '設施及機械設備養護費', '2072': '國內旅費', '2075': '大陸地區旅費', '2078': '國外旅費', 
+      '2081': '運費', '2084': '短程車資', '2087': '機要費', '2090': '機密費', 
+      '2093': '特別費', '3000': '設備及投資', '3005': '土地', '3010': '房屋建築及設備費', 
+      '3015': '公共建設及設施費', '3020': '機械設備費', '3025': '運輸設備費', '3030': '資訊軟硬體設備費', 
+      '3035': '雜項設備費', '3040': '權利', '3045': '投資', '4000': '獎補助費', 
+      '4005': '對直轄市政府之補助', '4010': '對各縣市政府之補助', '4020': '地方政府對下級政府之補助', 
+      '4025': '政府機關間之補助', '4030': '對特種基金之補助', '4035': '對外之捐助', '4040': '對國內團體之捐助', 
+      '4045': '對私校之獎助', '4050': '對學生之獎助', '4055': '社會保險負擔', '4060': '對公保軍保退撫基金之補助及挹注', 
+      '4065': '社會福利津貼及濟助', '4070': '公費就養及醫療補助', '4075': '差額補貼', '4080': '損失及賠償', 
+      '4085': '獎勵及慰問', '4090': '其他補助及捐助', '5000': '債務費', '5005': '債務利息', 
+      '5010': '手續費', '6000': '預備金', '6010': '第二預備金', '6015': '其他準備金'
     };
     
     const _strip = s => String(s || '').replace(/[\s ]/g, '');
@@ -361,12 +375,13 @@
       for (let i = 0; i < _COLS.length - 1; i++) {
         const a = hx[_COLS[i]];
         const b = hx[_COLS[i + 1]];
-        if (a != null && b != null) bound[_COLS[i]] = (a + b) / 2;
+        if (a != null && b != null) {
+          bound[_COLS[i]] = (a + b) / 2;
+        }
       }
       
       const headY = Math.min(...band.map(w => w.y));
       const cnt = {};
-      
       for (const w of ws) {
         if (w.y < headY - 2 && w.x > hx.amount && !/^[\d,]/.test(w.s.trim()) && _strip(w.s).length >= 2) {
           cnt[Math.round(w.x)] = (cnt[Math.round(w.x)] || 0) + 1;
@@ -374,7 +389,9 @@
       }
       
       const mode = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0];
-      if (mode && mode[1] >= 3) bound.amount = +mode[0] - 2;
+      if (mode && mode[1] >= 3) {
+        bound.amount = +mode[0] - 2;
+      }
       
       const single = {};
       for (const w of ws) {
@@ -418,7 +435,6 @@
           
           const c = colOf(w.x);
           
-          // 案號黏在合法千分位金額後：9,330,00001-案件名稱 -> 9,330,000 + 01-案件名稱
           if (c === 'amount') {
             const glued = raw.match(/^(-?\d{1,3}(?:,\d{3})+)(0[1-9]|[1-9]\d)([-–].+)$/);
             if (glued) {
@@ -428,7 +444,6 @@
             }
           }
           
-          // 金額、案號、名稱被拆成不同物件：9,330,000 | 01 | -案件名稱
           if (c === 'amount' && /^(0[1-9]|[1-9]\d)$/.test(raw) && cell.amount.length > 0) {
             cell.desc.push(raw);
             continue;
@@ -453,8 +468,6 @@
         }
         
         const j = a => a.join('').trim();
-        
-        // 後備：金額已重建為9,330,00001，而說明由連字號開始。
         if (!cell.unit.length && !cell.qty.length && !cell.price.length && /^[-–]/.test(j(cell.desc))) {
           const fixed = j(cell.amount).match(/^(-?\d{1,3}(?:,\d{3})+)(0[1-9]|[1-9]\d)$/);
           if (fixed) {
@@ -469,9 +482,7 @@
         }
         
         const line = { y: r.y };
-        for (const k of _COLS) {
-          line[k] = j(cell[k]);
-        }
+        for (const k of _COLS) line[k] = j(cell[k]);
         if (_COLS.some(k => line[k])) out.push(line);
       }
       return out;
@@ -505,6 +516,52 @@
       return /(總工程費|總經費)(?:明細)?如下|總工程費\s*[（(]?或[）)]?\s*總經費/.test(_strip(s));
     }
     
+    function _attachTotalCostTooltips(rows) {
+      let currentCase = null;
+      for (const r of rows) {
+        if (r.level === '案別') {
+          currentCase = r;
+          currentCase.totalCostItems = [];
+          continue;
+        }
+        if (r.level === '分支計畫' || r.level === '計畫說明') {
+          currentCase = null;
+          continue;
+        }
+        if (r.level !== '總經費' || !currentCase) continue;
+        
+        const amount = _num(r.amount);
+        const text = (r.desc || '').trim();
+        const key = `${amount}|${text}`;
+        if (!currentCase.totalCostItems.some(x => x.key === key)) {
+          currentCase.totalCostItems.push({
+            key, amount, text, unit: r.unit || '', qty: r.qty || '', price: _num(r.price)
+          });
+        }
+      }
+      
+      for (const r of rows) {
+        if (!r.totalCostItems?.length) continue;
+        const amounts = [...new Set(r.totalCostItems.map(x => x.amount).filter(Boolean))];
+        r.totalCostAmount = amounts.length ? Math.max(...amounts) : 0;
+        const lines = [];
+        if (r.totalCostAmount) {
+          lines.push(`全期總工程費／總經費：${_fmt(r.totalCostAmount)}元`);
+        }
+        
+        for (const x of r.totalCostItems) {
+          if (!x.unit && !x.qty && !x.price && (!x.text || /總工程費|總經費/.test(x.text))) continue;
+          const label = x.text || '總經費組成';
+          const value = x.amount || x.price;
+          const line = value ? `${label}：${_fmt(value)}元` : label;
+          if (!lines.includes(line)) lines.push(line);
+        }
+        lines.push('此金額僅供查閱，不納入本年度明細合計及四層驗算。');
+        r.totalCostTooltip = lines.join('\n');
+      }
+      return rows;
+    }
+    
     async function parseLocalDoc(pdf, onProgress) {
       const out = [];
       let plan = null, br = null, l1 = null, acct = null, totalMode = false;
@@ -514,19 +571,22 @@
         if (onProgress) onProgress(i, pdf.numPages);
         const tc = await (await pdf.getPage(i)).getTextContent();
         const flat = tc.items.map(it => it.str).join('').replace(/[\s ]/g, '');
-        
         if (!flat.includes(_LOCAL_TITLE) || flat.includes('目次')) continue;
         
-        const ws = tc.items.map(it => ({ x: it.transform[4], y: it.transform[5], s: it.str }))
-          .filter(w => w.s.trim())
-          .sort((a, b) => b.y - a.y);
-          
+        const ws = tc.items.map(it => ({
+          x: it.transform[4],
+          y: it.transform[5],
+          s: it.str
+        })).filter(w => w.s.trim()).sort((a, b) => b.y - a.y);
+        
         const rows0 = _groupRows(ws);
         const texts0 = rows0.map(r => _strip(r.ws.map(w => w.s).join('')));
         
         if (!_unitAgency) {
           const bi = texts0.findIndex(t => t.includes(_LOCAL_TITLE));
-          if (bi > 0 && /^[一-鿿－]{2,30}$/.test(texts0[bi - 1])) _unitAgency = texts0[bi - 1];
+          if (bi > 0 && /^[一-鿿－]{2,30}$/.test(texts0[bi - 1])) {
+            _unitAgency = texts0[bi - 1];
+          }
         }
         
         const pcw = ws.find(w => /\b\d[0-9a-z]{10}\b/i.test(w.s));
@@ -577,7 +637,6 @@
             const code = am[1];
             const name = _ACCT[code] || am[2].trim();
             const row = _localRow(plan, br, ln, code.endsWith('000') ? '用途別一級' : '用途別二級');
-            
             if (code.endsWith('000')) {
               l1 = { code, name };
               row.l1Code = code;
@@ -658,6 +717,8 @@
           }
         }
       }
+      
+      _attachTotalCostTooltips(out);
       _repairDetailAmounts(out);
       return out;
     }
@@ -672,6 +733,7 @@
         if (!cur || !details.length) return;
         const target = _num(cur.amount);
         const sum = details.reduce((s, r) => s + _num(r.amount), 0);
+        
         if (sum <= target) return;
         
         const candidates = details.map(r => {
@@ -743,7 +805,8 @@
     }
     
     function reconcile(rows) {
-      const bad = [], n = _num;
+      const bad = [];
+      const n = _num;
       let cur = null, acc = 0, cnt = 0;
       
       const close = () => {
@@ -777,7 +840,6 @@
       
       const k1 = r => [r.planCode, r.branchCode, r.l1Code].join('|');
       const l1 = new Map();
-      
       for (const r of rows) {
         if (r.level === '用途別一級') {
           const g = l1.get(k1(r));
@@ -811,9 +873,10 @@
       
       const k2 = r => [r.planCode, r.branchCode].join('|');
       const brs = new Map();
-      
       for (const r of rows) {
-        if (r.level === '分支計畫') brs.set(k2(r), { a: n(r.amount), s: 0, r });
+        if (r.level === '分支計畫') {
+          brs.set(k2(r), { a: n(r.amount), s: 0, r });
+        }
       }
       
       for (const r of rows) {
@@ -841,7 +904,9 @@
       
       const pl = new Map();
       for (const r of rows) {
-        if (r.planBudget) pl.set(r.planCode, { a: n(r.planBudget), s: 0, r });
+        if (r.planBudget) {
+          pl.set(r.planCode, { a: n(r.planBudget), s: 0, r });
+        }
       }
       
       for (const r of rows) {
@@ -866,6 +931,7 @@
           });
         }
       }
+      
       return bad;
     }
     
@@ -896,11 +962,10 @@
           y: M.HEAPF64[py / 8]
         });
       }
-      
       M._free(px);
       M._free(py);
-      const rows = [];
       
+      const rows = [];
       for (const ch of chars) {
         if (ch.c === '\r' || ch.c === '\n') continue;
         let r = rows.find(r0 => Math.abs(r0.y - ch.y) <= 2);
@@ -937,7 +1002,6 @@
       const ptr = M._malloc(data.length);
       M.HEAPU8.set(data, ptr);
       const doc = lib.FPDF_LoadMemDocument(ptr, data.length, 0);
-      
       if (!doc) {
         M._free(ptr);
         throw Error('PDFium 開檔失敗');
@@ -1055,21 +1119,15 @@
     
     function esc(s) {
       return String(s ?? '').replace(/[&<>"']/g, c => ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;'
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
       }[c]));
     }
     
     function render() {
       _issues = reconcile(_rows);
-      
       const cls = {
         '計畫說明': 'lv-plan',
         '案別': 'lv-case',
-        '總經費': 'lv-total-cost',
         '分支計畫': 'lv-branch',
         '用途別一級': 'lv-l1',
         '用途別二級': 'lv-l2',
@@ -1090,7 +1148,7 @@
       
       const getOpts = (l, pick, vf, tf) => {
         const m = new Map();
-        for (const r of _rows.filter(r => _passUpTo(r, l))) {
+        for (const r of _rows.filter(r => r.level !== '總經費' && _passUpTo(r, l))) {
           if (pick(r) && !m.has(vf(r))) m.set(vf(r), tf(r));
         }
         const opts = [...m].map(([v, t]) => ({ v, t }));
@@ -1104,15 +1162,27 @@
       const levelOpts = getOpts('level', r => r.level, r => r.level, r => r.level);
       const F = _filter;
       
-      const sel = (k, label, opts, cur) => `<label>${label}：<select onchange="_onFilter('${k}',this.value)"><option value="">全部</option>${opts.map(o => `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.t)}</option>`).join('')}</select></label>`;
+      const sel = (k, label, opts, cur) => `
+        <label>${label}：
+          <select onchange="_onFilter('${k}', this.value)">
+            <option value="">全部</option>
+            ${opts.map(o => `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.t)}</option>`).join('')}
+          </select>
+        </label>`;
+        
       const search = `<label>說明搜尋：<input value="${esc(F.q)}" placeholder="輸入關鍵字後按 Enter" oninput="_filter.q=this.value" onkeydown="if(event.key==='Enter')render()"></label>`;
       const clear = (F.plan || F.branch || F.acct || F.level || F.q) ? `<button class="btn-sec" onclick="_filter.plan=_filter.branch=_filter.acct=_filter.level=_filter.q='';render()" style="padding:5px 12px">清除</button>` : '';
-      const filter = `<div class="filter-bar">${sel('plan', '工作計畫', planOpts, F.plan)}${sel('branch', '分支計畫', brOpts, F.branch)}${sel('acct', '用途別科目', acctOpts, F.acct)}${sel('level', '層級', levelOpts, F.level)}${search}${clear}</div>`;
       
-      const view = _rows.filter(_pass);
+      const filter = `<div class="filter-bar">${sel('plan', '工作計畫', planOpts, F.plan)}${sel('branch', '分支計畫', brOpts, F.branch)}${sel('acct', '用途別科目', acctOpts, F.acct)}${sel('level', '層級', levelOpts, F.level)}${search}${clear}</div>`;
+      const view = _rows.filter(r => r.level !== '總經費' && _pass(r));
       const leaves = view.filter(r => r.level === '明細' && !r.excluded);
       const total = leaves.reduce((s, r) => s + _num(r.amount), 0);
-      const totalRow = `<tr class="lv-total"><td colspan="9">合計（目前篩選：${leaves.length}筆本年度明細；總經費列不計）</td><td class="num">${_fmt(total)}</td><td></td></tr>`;
+      
+      const totalRow = `<tr class="lv-total">
+        <td colspan="9">合計（目前篩選：${leaves.length}筆本年度明細；總經費列不計）</td>
+        <td class="num">${_fmt(total)}</td>
+        <td></td>
+      </tr>`;
       
       const body = view.map(r => `
         <tr class="${cls[r.level] || ''}">
@@ -1125,7 +1195,10 @@
           <td>${esc(r.unit)}</td>
           <td class="num">${esc(r.qty)}</td>
           <td class="num">${_fmt(r.price)}</td>
-          <td class="num" title="${r.repaired ? '原始擷取：' + _fmt(r.originalAmount) : ''}">${_fmt(r.amount)}${r.repaired ? ' *' : ''}</td>
+          <td class="num ${r.totalCostTooltip ? 'has-total-cost' : ''}" title="${esc(r.repaired ? '原始擷取：' + _fmt(r.originalAmount) : r.totalCostTooltip || '')}">
+            ${_fmt(r.amount)}${r.repaired ? ' *' : ''}
+            ${r.totalCostTooltip ? `<span class="total-tip" title="${esc(r.totalCostTooltip)}">ⓘ</span>` : ''}
+          </td>
           <td>${esc(r.desc)}</td>
         </tr>
       `).join('');
@@ -1153,9 +1226,8 @@
               ${body}
             </tbody>
           </table>
-        </div>
-      `;
-      
+        </div>`;
+        
       const tbl = document.querySelector('.tw table');
       if (tbl && tbl.tHead) {
         tbl.style.setProperty('--head-h', tbl.tHead.getBoundingClientRect().height + 'px');
@@ -1163,22 +1235,15 @@
     }
     
     function _exportRows() {
-      return _rows.filter(_pass);
+      return _rows.filter(r => r.level !== '總經費' && _pass(r));
     }
     
     function exportData(kind) {
       if (!_rows.length) return;
       
-      const head = ['工作計畫編號', '工作計畫', '分支計畫編號', '分支計畫', '用途別科目代碼', '用途別科目', '層級', '單位', '數量', '單價', '預算數', '原始預算數', '自動修復', 'PDF頁碼', '說明'];
+      const head = ['工作計畫編號', '工作計畫', '分支計畫編號', '分支計畫', '用途別科目代碼', '用途別科目', '層級', '單位', '數量', '單價', '預算數', '原始預算數', '自動修復', '全期總經費', '總經費說明', 'PDF頁碼', '說明'];
       const view = _exportRows();
-      const arr = r => [
-        r.planCode, r.planName, r.branchCode, r.branchName,
-        r.l2Code || r.l1Code, r.l2Name || r.l1Name,
-        r.level, r.unit, r.qty, r.price,
-        r.amount === '' ? '' : +r.amount,
-        r.originalAmount ? +r.originalAmount : '',
-        r.repaired ? '是' : '', r.page, r.desc
-      ];
+      const arr = r => [r.planCode, r.planName, r.branchCode, r.branchName, r.l2Code || r.l1Code, r.l2Name || r.l1Name, r.level, r.unit, r.qty, r.price, r.amount === '' ? '' : +r.amount, r.originalAmount ? +r.originalAmount : '', r.repaired ? '是' : '', r.totalCostAmount || '', r.totalCostTooltip || '', r.page, r.desc];
       const fname = '歲出計畫說明提要與各項費用明細表';
       
       if (kind === 'xlsx') {
@@ -1199,7 +1264,6 @@
         content = JSON.stringify(view.map(r => Object.fromEntries(head.map((h, i) => [h, arr(r)[i]]))), null, 2);
         mime = 'application/json';
       }
-      
       download(content, fname + '.' + kind, mime);
     }
     
