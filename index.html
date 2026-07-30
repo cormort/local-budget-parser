@@ -237,6 +237,24 @@
     .has-total-cost {
       border-bottom: 2px dotted #7b1fa2;
     }
+
+    /* 自繪 tooltip：原本用 title 屬性，在捲動表格裡不易觸發也無法換行對齊。
+       position:fixed 掛在 body 之下，不會被 .tw 的 overflow:auto 裁掉。 */
+    #tip {
+      position: fixed;
+      z-index: 99;
+      display: none;
+      max-width: 420px;
+      padding: 8px 11px;
+      border-radius: 6px;
+      background: #333;
+      color: #fff;
+      font-size: 12px;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      pointer-events: none;
+      box-shadow: 0 2px 10px #0006;
+    }
   </style>
 </head>
 <body>
@@ -566,7 +584,8 @@
         
         for (const x of r.totalCostItems) {
           if (!x.unit && !x.qty && !x.price && (!x.text || /總工程費|總經費/.test(x.text))) continue;
-          const label = x.text || '總經費組成';
+          // 說明原文多以句號結尾，直接接「：」會變成「規劃設計費。：29,980,000元」
+          const label = (x.text || '總經費組成').replace(/[。，、：；．]+$/, '');
           const value = x.amount || x.price;
           const line = value ? `${label}：${_fmt(value)}元` : label;
           if (!lines.includes(line)) lines.push(line);
@@ -1148,6 +1167,39 @@
       render();
     }
     
+    // tooltip：事件委派 + 單一浮動節點，滑鼠移到任何 [data-tip] 上就顯示。
+    // 延後建立節點並檢查 addEventListener 是否存在——Node 回歸測試以 stub document
+    // 載入同一份程式碼，直接呼叫會在載入階段就丟例外。
+    if (typeof document.addEventListener === 'function') {
+      let _tipEl = null;
+      const _tipShow = (text, x, y) => {
+        if (!_tipEl) {
+          _tipEl = document.createElement('div');
+          _tipEl.id = 'tip';
+          document.body.appendChild(_tipEl);
+        }
+        _tipEl.textContent = text;
+        _tipEl.style.display = 'block';
+        // 先顯示再量尺寸，才能貼著游標又不超出視窗
+        const r = _tipEl.getBoundingClientRect();
+        _tipEl.style.left = Math.max(6, Math.min(x + 14, innerWidth - r.width - 6)) + 'px';
+        _tipEl.style.top = (y + r.height + 20 > innerHeight ? y - r.height - 12 : y + 18) + 'px';
+      };
+      document.addEventListener('mouseover', e => {
+        const el = e.target.closest?.('[data-tip]');
+        if (el) _tipShow(el.getAttribute('data-tip'), e.clientX, e.clientY);
+      });
+      document.addEventListener('mousemove', e => {
+        if (_tipEl && _tipEl.style.display === 'block' && e.target.closest?.('[data-tip]')) {
+          _tipShow(_tipEl.textContent, e.clientX, e.clientY);
+        }
+      });
+      document.addEventListener('mouseout', e => {
+        if (_tipEl && !e.relatedTarget?.closest?.('[data-tip]')) _tipEl.style.display = 'none';
+      });
+      addEventListener('scroll', () => { if (_tipEl) _tipEl.style.display = 'none'; }, true);
+    }
+
     function esc(s) {
       return String(s ?? '').replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -1226,9 +1278,9 @@
           <td>${esc(r.unit)}</td>
           <td class="num">${esc(r.qty)}</td>
           <td class="num">${_fmt(r.price)}</td>
-          <td class="num ${r.totalCostTooltip ? 'has-total-cost' : ''}" title="${esc(r.repaired ? '原始擷取：' + _fmt(r.originalAmount) : r.totalCostTooltip || '')}">
+          <td class="num ${r.totalCostTooltip ? 'has-total-cost' : ''}"${r.totalCostTooltip || r.repaired ? ` data-tip="${esc(r.repaired ? '原始擷取：' + _fmt(r.originalAmount) : r.totalCostTooltip)}"` : ''}>
             ${_fmt(r.amount)}${r.repaired ? ' *' : ''}
-            ${r.totalCostTooltip ? `<span class="total-tip" title="${esc(r.totalCostTooltip)}">ⓘ</span>` : ''}
+            ${r.totalCostTooltip ? '<span class="total-tip">ⓘ</span>' : ''}
           </td>
           <td>${esc(r.desc)}</td>
         </tr>
