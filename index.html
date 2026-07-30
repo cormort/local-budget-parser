@@ -31,6 +31,13 @@
   tr.lv-case td { background: #fffde7; font-weight: 600; }
   .ok { color: #155724; } .bad { color: #dc3545; font-weight: 700; }
   .tw { max-height: 70vh; overflow: auto; }
+  .btn-exp { background: #28a745; color: #fff; } .btn-exp:hover { background: #218838; }
+  .filter-bar { display: flex; flex-wrap: wrap; gap: 6px 0; align-items: center; margin: 10px 0; padding: 10px 14px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; }
+  .filter-bar label { margin-right: 14px; white-space: nowrap; font-size: 13px; color: #495057; }
+  .filter-bar select, .filter-bar input[type=text] { padding: 5px 8px; border: 1px solid #ced4da; border-radius: 4px; font-size: 13px; }
+  .filter-bar select { max-width: 260px; }
+  .filter-bar input[type=text] { width: 200px; }
+  tr.lv-total td { background: #1565c0; color: #fff; font-weight: 700; position: sticky; top: var(--head-h, 30px); z-index: 1; }
 </style>
 </head>
 <body>
@@ -45,7 +52,11 @@
     <div class="controls">
       <input type="file" id="f" accept=".pdf">
       <button class="btn-main" onclick="run()">解析</button>
-      <button class="btn-sec" onclick="exportCsv()">匯出 csv</button>
+      <span id="exportBtns" style="display:none;">
+        <button class="btn-exp" onclick="exportData('xlsx')" title="匯出目前查詢結果">匯出 xlsx</button>
+        <button class="btn-exp" onclick="exportData('csv')" title="匯出目前查詢結果">匯出 csv</button>
+        <button class="btn-exp" onclick="exportData('json')" title="匯出目前查詢結果">匯出 json</button>
+      </span>
       <span id="msg"></span>
     </div>
     <div class="controls" style="margin-top:10px;">
@@ -59,6 +70,7 @@
   </div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js';
         let _unitAgency = '';
@@ -513,35 +525,108 @@
                 return;
             }
             msg.textContent = `完成：${_rows.length} 列（機關：${_unitAgency || '未偵測'}｜引擎：${engine}）`;
+            // 重置篩選條件
+            _filter.plan = _filter.branch = _filter.acct = _filter.level = _filter.q = '';
+            document.getElementById('exportBtns').style.display = '';
             render();
         }
+        // ── 篩選 ────────────────────────────────────────────────
+        const _filter = { plan: '', branch: '', acct: '', level: '', q: '' };
+        function _pass(r) {
+            const F = _filter;
+            return (!F.plan || r.planCode === F.plan)
+                && (!F.branch || r.branchName === F.branch)
+                && (!F.acct || r.l1Code === F.acct || r.l2Code === F.acct)
+                && (!F.level || r.level === F.level)
+                && (!F.q || (r.desc || '').includes(F.q));
+        }
+        function _onFilter(k, v) { _filter[k] = v; render(); }
+
         function render() {
             const bad = reconcile(_rows);
             const cls = { '計畫說明': 'lv-plan', '案別': 'lv-case', '分支計畫': 'lv-branch', '用途別一級': 'lv-l1', '用途別二級': 'lv-l2', '明細': 'lv-detail' };
             const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-            const body = _rows.map(r => `<tr class="${cls[r.level] || ''}">`
+
+            // 驗算訊息（以完整資料驗算，不受篩選影響）
+            const reconLine = bad.length
+                ? `<p class="bad">⚠ 四層加總驗算有 ${bad.length} 處不符：<br>${bad.slice(0, 10).map(esc).join('<br>')}</p>`
+                : '<p class="ok">✅ 四層加總驗算全數通過（明細→科目→分支→工作計畫）</p>';
+
+            // 建構下拉選項
+            const distinct = (pick, vf, tf) => {
+                const m = new Map();
+                for (const r of _rows) if (pick(r) && !m.has(vf(r))) m.set(vf(r), tf(r));
+                return [...m].map(([v, t]) => ({ v, t }));
+            };
+            const planOpts = distinct(r => r.planCode, r => r.planCode, r => `${r.planCode} ${r.planName}`);
+            const brOpts = distinct(r => r.branchCode && r.branchName, r => r.branchName, r => r.branchName);
+            const acctOpts = distinct(r => r.l1Code || r.l2Code, r => r.l2Code || r.l1Code, r => `${r.l2Code || r.l1Code} ${r.l2Name || r.l1Name}`);
+            const levelOpts = distinct(r => r.level, r => r.level, r => r.level);
+            const F = _filter;
+            const selHTML = (k, label, opts, cur) =>
+                `<label>${label}：<select onchange="_onFilter('${k}',this.value)">`
+                + `<option value="">全部</option>`
+                + opts.map(o => `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.t)}</option>`).join('')
+                + `</select></label>`;
+            const searchHTML = `<label>說明搜尋：<input type="text" value="${esc(F.q)}" placeholder="輸入關鍵字後按 Enter" oninput="_filter.q=this.value" onchange="render()" onkeydown="if(event.key==='Enter'){render();}"></label>`;
+            const clearHTML = (F.plan || F.branch || F.acct || F.level || F.q)
+                ? `<button class="btn-sec" onclick="_filter.plan=_filter.branch=_filter.acct=_filter.level=_filter.q='';render();" style="padding:5px 12px;font-size:13px;">清除</button>` : '';
+            const filterHTML = `<div class="filter-bar">${selHTML('plan','工作計畫',planOpts,F.plan)}${selHTML('branch','分支計畫',brOpts,F.branch)}${selHTML('acct','用途別科目',acctOpts,F.acct)}${selHTML('level','層級',levelOpts,F.level)}${searchHTML}${clearHTML}</div>`;
+
+            // 篩選
+            const view = _rows.filter(_pass);
+            // 合計（取明細層加總；若無明細則取全部篩選結果）
+            const leaves = view.filter(r => r.level === '明細');
+            const total = (leaves.length ? leaves : view).reduce((s, r) => s + (+r.amount || 0), 0);
+            const totalLabel = leaves.length ? `${leaves.length} 筆明細` : `${view.length} 筆`;
+            const totalRow = `<tr class="lv-total"><td colspan="9">合計（目前篩選：${totalLabel}）</td><td class="num">${_fmt(total)}</td><td></td></tr>`;
+
+            const body = view.map(r => `<tr class="${cls[r.level] || ''}">`
                 + `<td>${esc(r.planCode)}</td><td>${esc(r.planName)}</td>`
                 + `<td>${esc(r.branchCode)}</td><td>${esc(r.branchName)}</td>`
                 + `<td>${esc(r.l2Code || r.l1Code)}</td><td>${esc(r.l2Name || r.l1Name)}</td>`
                 + `<td>${esc(r.unit)}</td><td class="num">${esc(r.qty)}</td><td class="num">${_fmt(r.price)}</td>`
                 + `<td class="num">${_fmt(r.amount)}</td><td>${esc(r.desc)}</td></tr>`).join('');
-            document.getElementById('out').innerHTML =
-                (bad.length ? `<p class="bad">⚠ 四層加總驗算有 ${bad.length} 處不符：<br>${bad.slice(0, 10).map(esc).join('<br>')}</p>`
-                    : '<p class="ok">✅ 四層加總驗算全數通過（明細→科目→分支→工作計畫）</p>')
+
+            document.getElementById('out').innerHTML = reconLine + filterHTML
                 + `<div class="tw"><table><thead><tr><th>工作計畫編號</th><th>工作計畫</th><th>分支計畫編號</th><th>分支計畫</th>`
                 + `<th>用途別科目代碼</th><th>用途別科目</th><th>單位</th><th>數量</th><th>單價</th><th>預算數</th><th>說明</th>`
-                + `</tr></thead><tbody>${body}</tbody></table></div>`;
+                + `</tr></thead><tbody>${totalRow}${body}</tbody></table></div>`;
+
+            // 合計列 sticky top 對齊實際表頭高度
+            const tbl = document.querySelector('.tw table');
+            if (tbl && tbl.tHead) tbl.style.setProperty('--head-h', tbl.tHead.getBoundingClientRect().height + 'px');
         }
-        function exportCsv() {
+
+        // ── 匯出（匯出目前篩選結果）────────────────────────────────
+        function exportData(kind) {
             if (!_rows.length) return;
             const head = ['工作計畫編號', '工作計畫', '分支計畫編號', '分支計畫', '用途別科目代碼', '用途別科目', '單位', '數量', '單價', '預算數', '說明'];
-            const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-            const csv = '\ufeff' + [head, ..._rows.map(r => [r.planCode, r.planName, r.branchCode, r.branchName,
-                r.l2Code || r.l1Code, r.l2Name || r.l1Name, r.unit, r.qty, r.price, r.amount, r.desc])]
-                .map(row => row.map(q).join(',')).join('\r\n');
+            const view = _rows.filter(_pass);
+            const rowArr = r => [r.planCode, r.planName, r.branchCode, r.branchName,
+                r.l2Code || r.l1Code, r.l2Name || r.l1Name, r.unit, r.qty, r.price,
+                r.amount === '' ? '' : +r.amount, r.desc];
+            const fname = '歲出計畫說明提要與各項費用明細表';
+            if (kind === 'xlsx') {
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ...view.map(rowArr)]), '費用明細表');
+                XLSX.writeFile(wb, fname + '.xlsx');
+                return;
+            }
+            let content, mime;
+            if (kind === 'csv') {
+                const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+                content = '\ufeff' + [head, ...view.map(rowArr)].map(row => row.map(q).join(',')).join('\r\n');
+                mime = 'text/csv;charset=utf-8';
+            } else {
+                content = JSON.stringify(view.map(r => Object.fromEntries(head.map((h, i) => [h, rowArr(r)[i]]))), null, 2);
+                mime = 'application/json';
+            }
             const a = document.createElement('a');
-            a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-            a.download = '歲出計畫說明提要與各項費用明細表.csv'; a.click();
+            a.href = URL.createObjectURL(new Blob([content], { type: mime }));
+            a.download = fname + '.' + kind;
+            a.click();
+            URL.revokeObjectURL(a.href);
         }
 </script>
 </body>
