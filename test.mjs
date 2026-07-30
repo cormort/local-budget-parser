@@ -55,6 +55,21 @@ const EXPECT = {
     // 主管單位預算（社會局＋所屬 5 機關，341 頁）。說明欄有大量公文字號，是
     //「工作計畫代碼只能取自表頭帶」這條規則的實證：放寬到整頁搜尋時，
     // 1140761123A 等公文字號會變成假計畫，其後數十頁明細全部改掛到假計畫下。
+    // 案號與案名之間沒有破折號的寫法（「03115年度道路工程規劃設計」），
+    // 是「案別不能只認破折號」這條規則的實證：只認破折號時案小計會被算進上一個科目。
+    '臺北市新工處': {
+        file: 'examples/taipei-newworks-116.pdf',
+        agency: '臺北市政府工務局新建工程處',
+        plans: 4,
+        branches: 17,
+        l1: 58,
+        l2: 133,
+        detail: 265,
+        rows: 579,
+        extra(rows, errors) {
+            addMismatch(errors, '案別列數', 41, rows.filter(r => r.level === '案別').length);
+        },
+    },
     '新北市政府社會局': {
         file: 'examples/newtaipei-social-115.pdf',
         engine: 'pdfium',
@@ -244,8 +259,12 @@ async function runBaselineCase(name, want, html) {
     }
 
     // 「總工程費／總經費」不得仍被歸類為一般明細。
+    // 單位／數量／單價齊全的列是真明細，說明裡寫「總經費明細如下：」只是列出自己的內訳
+    //（實測新工處 2018「…總經費明細如下：1.…2,070,000元。2.…30,000元。」內訳合計正好
+    // 等於該列的 2,100,000），不是總工程費表頭列。
     const leakedTotalCostDetails = rows.filter(r =>
         r.level === '明細'
+        && !r.unit && !r.qty && !r.price
         && /(總工程費|總經費)(?:明細)?如下/.test((r.desc || '').replace(/[\s　]/g, ''))
     );
     if (leakedTotalCostDetails.length) {

@@ -268,6 +268,8 @@
         <button class="btn-sec" onclick="loadSample('taichung')">臺中市主計處 115年度</button>
         <button class="btn-sec" onclick="loadSample('kaohsiung')">高雄市主計處 115年度</button>
         <button class="btn-sec" onclick="loadSample('newtaipei')">新北市主計處 115年度</button>
+        <button class="btn-sec" onclick="loadSample('newtaipeiSocial')">新北市社會局主管 115年度</button>
+        <button class="btn-sec" onclick="loadSample('taipeiNewWorks')">臺北市新工處 116年度</button>
       </div>
       
       <div id="out"></div>
@@ -678,7 +680,12 @@
             continue;
           }
           
-          if (!nm && ln.amount && !ln.unit && !ln.qty && !ln.price && /^\d{2}[-–]/.test(ln.desc)) {
+          // 案號與案名之間不一定有破折號：臺北主計處／社會局寫「03-113年個人電腦租賃費」，
+          // 新工處寫「03115年度道路工程規劃設計」「10洲美快速道路…」。只認破折號時，
+          // 案小計會被當成明細算進上一個科目（實測新工處 3 處明細≠科目，差額正是案小計）。
+          // 仍要求左欄空白且無單位／數量／單價——實測七份樣本中，符合此形狀的列全是案別。
+          if (!nm && ln.amount && !ln.unit && !ln.qty && !ln.price
+            && /^\d{2}(?:[-–]|(?=\d{3}年度)|(?=[^\d]))/.test(ln.desc)) {
             totalMode = false;
             const row = _localRow(plan, br, ln, '案別');
             out.push(row);
@@ -1055,7 +1062,9 @@
       taipeiSocial: { file: 'examples/taipei-social-116.pdf', label: '臺北市政府社會局116年度' },
       taichung: { file: 'examples/taichung-115.pdf', label: '臺中市政府主計處115年度' },
       kaohsiung: { file: 'examples/kaohsiung-115.pdf', label: '高雄市政府主計處115年度' },
-      newtaipei: { file: 'examples/newtaipei-115.pdf', label: '新北市政府主計處115年度' }
+      newtaipei: { file: 'examples/newtaipei-115.pdf', label: '新北市政府主計處115年度' },
+      newtaipeiSocial: { file: 'examples/newtaipei-social-115.pdf', label: '新北市政府社會局主管115年度' },
+      taipeiNewWorks: { file: 'examples/taipei-newworks-116.pdf', label: '臺北市政府新工處116年度' }
     };
     
     async function loadSample(key) {
