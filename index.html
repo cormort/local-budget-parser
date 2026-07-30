@@ -530,7 +530,7 @@
             document.getElementById('exportBtns').style.display = '';
             render();
         }
-        // ── 篩選 ────────────────────────────────────────────────
+        // ── 篩選與連動下拉 (Cascading Dropdown) ────────────────
         const _filter = { plan: '', branch: '', acct: '', level: '', q: '' };
         function _pass(r) {
             const F = _filter;
@@ -540,6 +540,22 @@
                 && (!F.level || r.level === F.level)
                 && (!F.q || (r.desc || '').includes(F.q));
         }
+
+        // 依據階層連動條件過濾：計算特定層級可用的下拉選項時，只套用該層級及以上（或無條件）的過濾條件
+        function _passUpTo(r, levelName) {
+            const F = _filter;
+            if (F.q && !(r.desc || '').includes(F.q)) return false;
+            if (levelName === 'plan') return true;
+            if (F.plan && r.planCode !== F.plan) return false;
+            if (levelName === 'branch') return true;
+            if (F.branch && r.branchName !== F.branch) return false;
+            if (levelName === 'acct') return true;
+            if (F.acct && r.l1Code !== F.acct && r.l2Code !== F.acct) return false;
+            if (levelName === 'level') return true;
+            if (F.level && r.level !== F.level) return false;
+            return true;
+        }
+
         function _onFilter(k, v) { _filter[k] = v; render(); }
 
         function render() {
@@ -552,16 +568,24 @@
                 ? `<p class="bad">⚠ 四層加總驗算有 ${bad.length} 處不符：<br>${bad.slice(0, 10).map(esc).join('<br>')}</p>`
                 : '<p class="ok">✅ 四層加總驗算全數通過（明細→科目→分支→工作計畫）</p>';
 
-            // 建構下拉選項
-            const distinct = (pick, vf, tf) => {
+            // 建構階層連動下拉選項（Cascading Options）
+            const getOpts = (levelName, pick, vf, tf) => {
+                const subset = _rows.filter(r => _passUpTo(r, levelName));
                 const m = new Map();
-                for (const r of _rows) if (pick(r) && !m.has(vf(r))) m.set(vf(r), tf(r));
-                return [...m].map(([v, t]) => ({ v, t }));
+                for (const r of subset) if (pick(r) && !m.has(vf(r))) m.set(vf(r), tf(r));
+                const opts = [...m].map(([v, t]) => ({ v, t }));
+                // 若當前選擇的值已不在連動後的選項中，自動重置為全部 ('')
+                if (_filter[levelName] && !opts.some(o => o.v === _filter[levelName])) {
+                    _filter[levelName] = '';
+                }
+                return opts;
             };
-            const planOpts = distinct(r => r.planCode, r => r.planCode, r => `${r.planCode} ${r.planName}`);
-            const brOpts = distinct(r => r.branchCode && r.branchName, r => r.branchName, r => r.branchName);
-            const acctOpts = distinct(r => r.l1Code || r.l2Code, r => r.l2Code || r.l1Code, r => `${r.l2Code || r.l1Code} ${r.l2Name || r.l1Name}`);
-            const levelOpts = distinct(r => r.level, r => r.level, r => r.level);
+
+            const planOpts = getOpts('plan', r => r.planCode, r => r.planCode, r => `${r.planCode} ${r.planName}`);
+            const brOpts = getOpts('branch', r => r.branchCode && r.branchName, r => r.branchName, r => r.branchName);
+            const acctOpts = getOpts('acct', r => r.l1Code || r.l2Code, r => r.l2Code || r.l1Code, r => `${r.l2Code || r.l1Code} ${r.l2Name || r.l1Name}`);
+            const levelOpts = getOpts('level', r => r.level, r => r.level, r => r.level);
+
             const F = _filter;
             const selHTML = (k, label, opts, cur) =>
                 `<label>${label}：<select onchange="_onFilter('${k}',this.value)">`
