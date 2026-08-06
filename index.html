@@ -650,7 +650,9 @@
           const code = codeOf(cw), codeX = cw.x;
           const nameCol = w => !isNum(w) && !codeOf(w) && w.x > codeX - 25 && w.x < (xB ?? 170) - 10;
           const amtOf = l => {
-            const n = l.w.filter(w => isNum(w) && w.x >= codeX - 5);
+            // 代碼本身也是一長串數字，不排掉會被當成金額（中央版代碼獨佔一行時，
+          // 金額欄就抓到代碼，實測衛福部整份 21 個計畫全錯）
+          const n = l.w.filter(w => isNum(w) && !codeOf(w) && w.x >= codeX - 5);
             return (xB != null && n.find(w => Math.abs(w.x - xB) < 45)) || n[0];
           };
           // 版面有兩種：代碼與金額同一列、名稱在下一列（地方版），
@@ -665,7 +667,7 @@
           }
           // 名稱欄寬不夠時折到後續行（「新北市政府家庭暴」→「力暨性侵害防治中」→「心」）
           for (let j = start; j < lines.length; j++) {
-            if (lines[j].w.some(w => codeOf(w)) || lines[j].w.some(w => isNum(w) && w.x >= codeX - 5)) break;
+            if (lines[j].w.some(w => codeOf(w)) || lines[j].w.some(w => isNum(w) && !codeOf(w) && w.x >= codeX - 5)) break;
             const c = uniq(lines[j].w.filter(nameCol)).map(w => w.s).join('').replace(/[\s　]/g, '');
             if (!c) break;
             name += c;
@@ -691,29 +693,30 @@
       return 'diff';
     }
 
-    // 概況表的工作計畫 vs 機關別表。回傳 { checked, issues }。
+    // 概況表的工作計畫 vs 機關別表。回傳 { total, checked, unmatched, noName, issues }。
     // 刻意「不」把『概況表有、機關別表沒有』當成錯誤：新北市有 7 個代碼含字母的計畫
-    // （8970a010401 等）屬另一款別，本來就不列在這張表裡，報出來全是假警報。
-    // 改為回報涵蓋率，讓使用者自己看核對到幾個。
+    // （8970a010401 等）屬另一款別，本來就不列在這張表裡，報成不符全是假警報。
+    // 但也不能當成沒事——那些計畫的金額就是「沒有第二個來源可驗」，必須明講，
+    // 否則使用者會把「核對通過」誤讀成全部都驗過了。故獨立回傳 unmatched 供畫面提醒。
     function crossCheckAgencyPlans(rows, agency) {
       const plans = new Map();
       for (const r of rows) if (r.planCode && !plans.has(r.planCode)) plans.set(r.planCode, { name: r.planName, budget: r.planBudget });
-      const issues = [];
+      const issues = [], unmatched = [], nameUnverified = [];
       let checked = 0, noName = 0;
       for (const [code, p] of plans) {
         const a = agency.map.get(code);
-        if (!a) continue;
+        if (!a) { unmatched.push({ code, name: p.name, budget: p.budget }); continue; }
         checked++;
         // 概況表的 planBudget 單位是元，機關別表是千元
         const av = a.budget ? parseInt(a.budget.replace(/,/g, ''), 10) * 1000 : null;
         if (av === null) issues.push({ code, kind: '金額未取得', plan: p.name, a: '(未取得)', b: _fmt(+p.budget) });
         else if (av !== +p.budget) issues.push({ code, kind: '本年度預算數不符', plan: p.name, a: _fmt(av), b: _fmt(+p.budget) });
         const ni = _planNameIssue(a.name, p.name);
-        if (ni === 'noname') noName++;
-        else if (ni === 'short') issues.push({ code, kind: '概況表名稱不完整', plan: p.name, a: a.name, b: p.name });
+        if (ni === 'noname') { noName++; nameUnverified.push({ code, name: p.name }); }
+        else if (ni === 'short') issues.push({ code, kind: '本表名稱不完整', plan: p.name, a: a.name, b: p.name });
         else if (ni) issues.push({ code, kind: '名稱對不上', plan: p.name, a: a.name, b: p.name });
       }
-      return { total: plans.size, checked, noName, issues };
+      return { total: plans.size, checked, noName, issues, unmatched, nameUnverified };
     }
 
     async function parseLocalDoc(pdf, onProgress) {
@@ -756,12 +759,40 @@
         }
         
         if (pcode && (!plan || plan.code !== pcode)) {
-          const ni = texts0.findIndex(t => t.includes('名稱與編號'));
+          // 計畫名稱有兩種版面，靠「代碼是不是自成一個 item」分流：
+          //
+          // (A) 代碼與欄位標籤黏在一起（新北：`業務計畫及工作計畫62111100101`）
+          //     → 名稱就在「名稱與編號」那一行、標籤右側，且是完整的一段。
+          //
+          // (B) 代碼自成一個 item、獨佔一行（臺中、臺北社會局）
+          //     → 名稱在代碼「正下方」、與代碼同一個 x，且欄寬不夠時會折成多段：
+          //         y=724 x=149 「32020040701」
+          //         y=712 x=149 「歲計會計業務-總預算編審與督」
+          //         y=698 x=149 「導執行」
+          //         y=670 x=149 「1.編審總預算…」   ← 計畫內容，名稱到此為止
+          //     原本此路只取第一段，實測臺中 3、新北社會局 2、臺北社會局 1 筆被截斷
+          //     （「導執行」應為「歲計會計業務-總預算編審與督導執行」）。
+          //
+          // 分流條件不可省：(B) 的收集邏輯套到 (A) 上會一路吃進表格內文
+          //（實測收出「歲出計畫說明合計01人員維持費1000 人事費…」）。
+          const _NAME_STOP = /^\s*(?:[\d０-９]+[.、．]|[一二三四五六七八九十]+[、.．])/;
+          const codeAlone = /^\s*\d{10,11}\s*$/.test(pcw.s);
           let name = '';
-          if (ni >= 0) {
-            const lab = rows0[ni].ws.find(w => _strip(w.s).includes('名稱與編號')) || rows0[ni].ws[0];
-            const cand = rows0[ni].ws.filter(w => w.x > lab.x + 10 && /[一-鿿]/.test(w.s)).sort((a, b) => a.x - b.x)[0];
-            if (cand) name = cand.s.trim();
+          if (codeAlone) {
+            for (const w of ws.filter(w => Math.abs(w.x - pcw.x) < 6 && w.y < pcw.y - 2 && w.s.trim())
+              .sort((a, b) => b.y - a.y)) {
+              const t = w.s.trim();
+              if (_NAME_STOP.test(t) || !/[一-鿿]/.test(t)) break;
+              name += t;
+            }
+          }
+          if (!name) {
+            const ni = texts0.findIndex(t => t.includes('名稱與編號'));
+            if (ni >= 0) {
+              const lab = rows0[ni].ws.find(w => _strip(w.s).includes('名稱與編號')) || rows0[ni].ws[0];
+              const cand = rows0[ni].ws.filter(w => w.x > lab.x + 10 && /[一-鿿]/.test(w.s)).sort((a, b) => a.x - b.x)[0];
+              if (cand) name = cand.s.trim();
+            }
           }
           if (!name) {
             const below = ws.filter(w => Math.abs(w.x - pcw.x) < 6 && w.y < pcw.y - 2).sort((a, b) => b.y - a.y)[0];
@@ -1360,15 +1391,27 @@
         reconLine += `<p class="note">ℹ️ 這份 PDF 沒有解析到「歲出機關別預算表」，略過工作計畫核對（上方驗算僅為自我一致性檢查）。</p>`;
       } else {
         const c = _agencyCheck;
-        const cover = `${c.checked}/${c.total} 個工作計畫`
-          + (c.checked < c.total ? `（另 ${c.total - c.checked} 個不在該表的款別內，屬正常）` : '')
-          + (c.noName ? `，其中 ${c.noName} 個在該表抽不到名稱、略過名稱比對` : '');
         if (!c.issues.length) {
-          reconLine += `<p class="ok">✅ 工作計畫核對通過：${cover} 的編號、名稱與本年度預算數皆與歲出機關別預算表相符</p>`;
+          reconLine += `<p class="ok">✅ 工作計畫核對通過：${c.checked}/${c.total} 個工作計畫的編號、名稱與本年度預算數皆與歲出機關別預算表相符</p>`;
         } else {
           const li = c.issues.map(x =>
             `${esc(x.kind)}｜${esc(x.code)}：機關別預算表「${esc(x.a)}」；本表「${esc(x.b)}」`).join('<br>');
-          reconLine += `<div class="recon bad">⚠ 工作計畫核對有 ${c.issues.length} 處不符（已核對 ${cover}）：<br>${li}</div>`;
+          reconLine += `<div class="recon bad">⚠ 工作計畫核對有 ${c.issues.length} 處不符（已核對 ${c.checked}/${c.total} 個工作計畫）：<br>${li}</div>`;
+        }
+        // 對不到的計畫要單獨講清楚：它們的金額「沒有第二個來源可驗」，不是驗過了沒問題。
+        // 把「已核對 N/M」寫在通過訊息裡還不夠——使用者會直接把綠色的✅讀成全部都驗過。
+        if (c.unmatched.length) {
+          const li = c.unmatched.map(x => `${esc(x.code)} ${esc(x.name)}：${_fmt(+x.budget)} 元`).join('<br>');
+          reconLine += `<div class="recon bad" style="border-left-color:#fd7e14;background:#fff8f0;">`
+            + `⚠ 有 ${c.unmatched.length} 個工作計畫在歲出機關別預算表中找不到對應編號，`
+            + `<strong>這些計畫的本年度預算數未經外部核對</strong>，請自行回對 PDF：<br>${li}`
+            + `<div class="small" style="margin-top:6px;">代碼含字母者（如 8970a010401）多屬另一款別，本就不列在該表，屬正常；`
+            + `若是一般代碼卻找不到，較可能是本工具漏抓或該表解析不全。</div></div>`;
+        }
+        if (c.nameUnverified.length) {
+          reconLine += `<p class="note">⚠ 有 ${c.nameUnverified.length} 個工作計畫在機關別預算表的名稱欄抽不到文字，`
+            + `<strong>名稱未經核對</strong>（金額仍有比對）：`
+            + esc(c.nameUnverified.map(x => `${x.code} ${x.name}`).join('、')) + '</p>';
         }
       }
 
