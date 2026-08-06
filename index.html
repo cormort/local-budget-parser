@@ -639,9 +639,11 @@
         const isNum = w => numParts(w).length > 0 && !/[^-\d,\s]/.test(w.s.trim());
         // 款項目節的層級號有時與代碼黏成同一個 item（高雄「01 　　　32020110101」），
         // 取最後一段空白分隔的 token 才拿得到代碼本身
+        // 代碼可能是純數字（中央 10 碼、地方 11 碼）或地方的含字母式（8970a010401）。
+        // 早期只認純數字，害 7 個含字母的工作計畫被判成「不在該表」——它們其實就在表裡。
         const codeOf = w => {
           const t = w.s.trim().split(/\s+/).pop().replace(/[\s　]/g, '');
-          return /^\d{10,11}$/.test(t) ? t : null;
+          return /^(?:\d{10,11}|\d{4}[a-z]\d{6})$/i.test(t) ? t : null;
         };
         const uniq = a => [...new Map(a.map(w => [Math.round(w.x) + '|' + w.s, w])).values()];
         for (let k = 0; k < lines.length; k++) {
@@ -701,7 +703,7 @@
     function crossCheckAgencyPlans(rows, agency) {
       const plans = new Map();
       for (const r of rows) if (r.planCode && !plans.has(r.planCode)) plans.set(r.planCode, { name: r.planName, budget: r.planBudget });
-      const issues = [], unmatched = [], nameUnverified = [];
+      const issues = [], unmatched = [], nameUnverified = [], budgetUnverified = [];
       let checked = 0, noName = 0;
       for (const [code, p] of plans) {
         const a = agency.map.get(code);
@@ -709,14 +711,16 @@
         checked++;
         // 概況表的 planBudget 單位是元，機關別表是千元
         const av = a.budget ? parseInt(a.budget.replace(/,/g, ''), 10) * 1000 : null;
-        if (av === null) issues.push({ code, kind: '金額未取得', plan: p.name, a: '(未取得)', b: _fmt(+p.budget) });
+        // 抽不到金額≠兩表有差異，是本工具沒讀到。報成「不符」等於誣賴預算書，
+        // 故與 unmatched 同類處理：講明「無法核對」，不列進不符數。
+        if (av === null) budgetUnverified.push({ code, name: p.name, budget: p.budget });
         else if (av !== +p.budget) issues.push({ code, kind: '本年度預算數不符', plan: p.name, a: _fmt(av), b: _fmt(+p.budget) });
         const ni = _planNameIssue(a.name, p.name);
         if (ni === 'noname') { noName++; nameUnverified.push({ code, name: p.name }); }
         else if (ni === 'short') issues.push({ code, kind: '本表名稱不完整', plan: p.name, a: a.name, b: p.name });
         else if (ni) issues.push({ code, kind: '名稱對不上', plan: p.name, a: a.name, b: p.name });
       }
-      return { total: plans.size, checked, noName, issues, unmatched, nameUnverified };
+      return { total: plans.size, checked, noName, issues, unmatched, nameUnverified, budgetUnverified };
     }
 
     async function parseLocalDoc(pdf, onProgress) {
@@ -776,10 +780,30 @@
           // 分流條件不可省：(B) 的收集邏輯套到 (A) 上會一路吃進表格內文
           //（實測收出「歲出計畫說明合計01人員維持費1000 人事費…」）。
           const _NAME_STOP = /^\s*(?:[\d０-９]+[.、．]|[一二三四五六七八九十]+[、.．])/;
-          const codeAlone = /^\s*\d{10,11}\s*$/.test(pcw.s);
-          let name = '';
+          const codeAlone = /^\s*(?:\d{10,11}|\d{4}[a-z]\d{6})\s*$/i.test(pcw.s);
+          // 名稱的第一段常被 pdf 與「業務計畫及工作計畫」標籤寫成同一個 item：
+          //   y=714 x=38  「業務計畫及工作計畫對鄉（鎮、市、直轄市山地原住民」
+          //   y=702 x=133 「區）之各項補助-對鄉（鎮、市、」
+          //   y=690 x=133 「直轄市山地原住民區）之各項補助」
+          // 只收 x 對齊代碼的那幾段會掉頭（實測新北 8970a010401 變成「區）之各項補助-…」）。
+          const _LAB = '業務計畫及工作計畫';
+          let head = '';
+          const labW = ws.find(w => _strip(w.s).startsWith(_LAB));
+          if (labW) {
+            const rest = _strip(labW.s).slice(_LAB.length);
+            // 標籤後面接的若是代碼本身（新北「業務計畫及工作計畫62111100101」）就不是名稱
+            if (rest && /[一-鿿]/.test(rest) && !_PLAN_CODE.test(rest)) head = rest;
+          }
+          // 名稱區塊的下界＝「一、計畫內容／項目內容」那一行。只靠「條列標號開頭」擋不住：
+          // 計畫內容的句子換行後，續行沒有標號且剛好也對齊名稱欄，會被一路吃進來
+          //（實測新北 8970a010401 收出「…各項補助勢族群基本生活權利及改善環境衛生。」）。
+          const _CONTENT_LAB = /^[一二三四五六七八九十]\s*[、.．]\s*(計畫|項目)內容/;
+          const stopW = ws.filter(w => w.y < pcw.y && _CONTENT_LAB.test(_strip(w.s)))
+            .sort((a, b) => b.y - a.y)[0];
+          const yStop = stopW ? stopW.y : -Infinity;
+          let name = head;
           if (codeAlone) {
-            for (const w of ws.filter(w => Math.abs(w.x - pcw.x) < 6 && w.y < pcw.y - 2 && w.s.trim())
+            for (const w of ws.filter(w => Math.abs(w.x - pcw.x) < 6 && w.y < pcw.y - 2 && w.y > yStop && w.s.trim())
               .sort((a, b) => b.y - a.y)) {
               const t = w.s.trim();
               if (_NAME_STOP.test(t) || !/[一-鿿]/.test(t)) break;
@@ -1407,6 +1431,11 @@
             + `<strong>這些計畫的本年度預算數未經外部核對</strong>，請自行回對 PDF：<br>${li}`
             + `<div class="small" style="margin-top:6px;">代碼含字母者（如 8970a010401）多屬另一款別，本就不列在該表，屬正常；`
             + `若是一般代碼卻找不到，較可能是本工具漏抓或該表解析不全。</div></div>`;
+        }
+        if (c.budgetUnverified.length) {
+          reconLine += `<p class="note">⚠ 有 ${c.budgetUnverified.length} 個工作計畫在機關別預算表的本年度預算數欄抽不到數字，`
+            + `<strong>金額未經核對</strong>：`
+            + esc(c.budgetUnverified.map(x => `${x.code} ${x.name}`).join('、')) + '</p>';
         }
         if (c.nameUnverified.length) {
           reconLine += `<p class="note">⚠ 有 ${c.nameUnverified.length} 個工作計畫在機關別預算表的名稱欄抽不到文字，`

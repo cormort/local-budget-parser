@@ -54,7 +54,7 @@ const EXPECT = {
         l2: 50,
         detail: 89,
         rows: 177,
-        agencyTable: { pages: 4, checked: 4, issues: 1, unmatched: 7 },
+        agencyTable: { pages: 4, checked: 11, issues: 2, unmatched: 0 },
     },
     // 主管單位預算（社會局＋所屬 5 機關，341 頁）。說明欄有大量公文字號，是
     //「工作計畫代碼只能取自表頭帶」這條規則的實證：放寬到整頁搜尋時，
