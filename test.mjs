@@ -16,6 +16,7 @@ const EXPECT = {
         l2: 53,
         detail: 97,
         rows: 192,
+        agencyTable: { pages: 2, checked: 4, issues: 0 },
     },
     '臺中市': {
         file: 'examples/taichung-115.pdf',
@@ -26,6 +27,7 @@ const EXPECT = {
         l2: 89,
         detail: 144,
         rows: 267,
+        agencyTable: { pages: 2, checked: 7, issues: 3 },
     },
     // 以下兩份的內文字型 pdf.js 無法解讀，改走 PDFium 後備引擎。
     // 引擎載入是 Node.js 測試環境的膠水；字元流轉換與偽文件物件
@@ -40,6 +42,7 @@ const EXPECT = {
         l2: 73,
         detail: 116,
         rows: 220,
+        agencyTable: { pages: 1, checked: 4, issues: 0 },
     },
     '新北市': {
         file: 'examples/newtaipei-115.pdf',
@@ -51,6 +54,7 @@ const EXPECT = {
         l2: 50,
         detail: 89,
         rows: 177,
+        agencyTable: { pages: 4, checked: 4, issues: 1 },
     },
     // 主管單位預算（社會局＋所屬 5 機關，341 頁）。說明欄有大量公文字號，是
     //「工作計畫代碼只能取自表頭帶」這條規則的實證：放寬到整頁搜尋時，
@@ -66,6 +70,7 @@ const EXPECT = {
         l2: 133,
         detail: 265,
         rows: 579,
+        agencyTable: { pages: 4, checked: 4, issues: 0 },
         extra(rows, errors) {
             addMismatch(errors, '案別列數', 41, rows.filter(r => r.level === '案別').length);
         },
@@ -80,6 +85,7 @@ const EXPECT = {
         l2: 269,
         detail: 1161,
         rows: 1555,
+        agencyTable: { pages: 10, checked: 14, issues: 6 },
         extra(rows, errors) {
             const sum = rs => rs.reduce((t, r) => t + (+r.amount || 0), 0);
             for (const code of ['1140761123A', '1130401415H', '1140012435D']) {
@@ -114,6 +120,7 @@ const SOCIAL_CASE = {
     name: '臺北市政府社會局',
     file: 'examples/taipei-social-116.pdf',
     agency: '臺北市政府社會局',
+    agencyTable: { pages: 5, checked: 7, issues: 1 },
 };
 
 let _pdfiumLib = null;
@@ -227,9 +234,15 @@ async function runBaselineCase(name, want, html) {
     const data = new Uint8Array(await readFile(new URL(want.file, import.meta.url)));
     const pdf = await openPdf(ctx, data, want.engine);
 
-    let rows;
+    let rows, agencyCheck = null, agencyPages = 0;
     try {
         rows = await ctx.parseLocalDoc(pdf);
+        // 工作計畫核對：拿同一本預算書的「歲出機關別預算表」當外部基準，驗工作計畫的
+        // 編號、名稱與本年度預算數。四層加總驗算只證明本表自己前後一致（頂端的工作計畫
+        // 預算數就取自本表自身），這條才驗得到那個頂端數字。
+        const ag = await ctx.parseAgencyPlanTable(pdf);
+        agencyPages = ag.pages;
+        if (ag.pages) agencyCheck = ctx.crossCheckAgencyPlans(rows, ag);
     } finally {
         if (pdf?.destroy) await pdf.destroy();
     }
@@ -246,8 +259,18 @@ async function runBaselineCase(name, want, html) {
 
     const errors = [];
     for (const [key, expected] of Object.entries(want)) {
-        if (key === 'file' || key === 'engine' || key === 'extra') continue;
+        if (key === 'file' || key === 'engine' || key === 'extra' || key === 'agencyTable') continue;
         addMismatch(errors, key, expected, got[key]);
+    }
+
+    // 工作計畫核對的期望值刻意記「目前實際數」而非 0：11 筆不符是真實存在的問題
+    // （6 筆概況表 planName 被截斷、5 筆本年度預算數與機關別表對不上，後者需翻 PDF 判斷
+    // 哪一側正確）。釘住數字是為了讓「修好了」或「又壞了」都會在這裡顯示出來。
+    if (want.agencyTable) {
+        const w = want.agencyTable;
+        addMismatch(errors, '機關別預算表頁數', w.pages, agencyPages);
+        addMismatch(errors, '已核對工作計畫數', w.checked, agencyCheck ? agencyCheck.checked : 0);
+        addMismatch(errors, '工作計畫核對不符數', w.issues, agencyCheck ? agencyCheck.issues.length : 0);
     }
     if (want.extra) want.extra(rows, errors);
 
@@ -274,7 +297,7 @@ async function runBaselineCase(name, want, html) {
     const issues = ctx.reconcile(rows);
     errors.push(...issues.map(issue => '驗算不符 → ' + issueText(issue)));
 
-    return { errors, got, rows, ctx, totalCostRows };
+    return { errors, got, rows, ctx, totalCostRows, agencyCheck };
 }
 
 async function runSocialCase(html) {
@@ -282,15 +305,24 @@ async function runSocialCase(html) {
     const data = new Uint8Array(await readFile(new URL(SOCIAL_CASE.file, import.meta.url)));
     const pdf = await openPdf(ctx, data);
 
-    let rows;
+    let rows, agencyCheck = null, agencyPages = 0;
     try {
         rows = await ctx.parseLocalDoc(pdf);
+        // 工作計畫核對：拿同一本預算書的「歲出機關別預算表」當外部基準，驗工作計畫的
+        // 編號、名稱與本年度預算數。四層加總驗算只證明本表自己前後一致（頂端的工作計畫
+        // 預算數就取自本表自身），這條才驗得到那個頂端數字。
+        const ag = await ctx.parseAgencyPlanTable(pdf);
+        agencyPages = ag.pages;
+        if (ag.pages) agencyCheck = ctx.crossCheckAgencyPlans(rows, ag);
     } finally {
         if (pdf?.destroy) await pdf.destroy();
     }
 
     const errors = [];
     addMismatch(errors, 'agency', SOCIAL_CASE.agency, ctx.detectedAgency());
+    addMismatch(errors, '機關別預算表頁數', SOCIAL_CASE.agencyTable.pages, agencyPages);
+    addMismatch(errors, '已核對工作計畫數', SOCIAL_CASE.agencyTable.checked, agencyCheck ? agencyCheck.checked : 0);
+    addMismatch(errors, '工作計畫核對不符數', SOCIAL_CASE.agencyTable.issues, agencyCheck ? agencyCheck.issues.length : 0);
 
     const totalCostRows = rows.filter(r => r.level === '總經費');
     if (!totalCostRows.length) {
@@ -423,6 +455,7 @@ async function runSocialCase(html) {
         rows,
         repairs,
         totalCostRows,
+        agencyCheck,
         got: {
             agency: ctx.detectedAgency(),
             plans: new Set(rows.map(r => r.planCode)).size,
@@ -441,7 +474,7 @@ let failed = 0;
 
 for (const [name, want] of Object.entries(EXPECT)) {
     try {
-        const { errors, got, totalCostRows } = await runBaselineCase(name, want, html);
+        const { errors, got, totalCostRows, agencyCheck } = await runBaselineCase(name, want, html);
         if (errors.length) {
             failed++;
             console.error(`✗ ${name}`);
@@ -454,7 +487,7 @@ for (const [name, want] of Object.entries(EXPECT)) {
             console.log(
                 `✓ ${name}  ${got.agency}｜${got.plans}計畫／${got.branches}分支／`
                 + `${got.l1}一級／${got.l2}二級／${got.detail}明細／`
-                + `${totalCostRows.length}總經費｜共${got.rows}列｜四層驗算0不符`,
+                + `${totalCostRows.length}總經費｜共${got.rows}列｜四層驗算0不符｜工作計畫核對 ${agencyCheck ? `${agencyCheck.checked}/${agencyCheck.total}，不符 ${agencyCheck.issues.length}` : '無機關別表'}`,
             );
         }
     } catch (error) {
@@ -466,7 +499,7 @@ for (const [name, want] of Object.entries(EXPECT)) {
 
 if (await fileExists(SOCIAL_CASE.file)) {
     try {
-        const { errors, got, repairs } = await runSocialCase(html);
+        const { errors, got, repairs, agencyCheck } = await runSocialCase(html);
         if (errors.length) {
             failed++;
             console.error(`✗ ${SOCIAL_CASE.name}`);
@@ -481,7 +514,7 @@ if (await fileExists(SOCIAL_CASE.file)) {
                 `✓ ${SOCIAL_CASE.name}  ${got.agency}｜${got.plans}計畫／${got.branches}分支／`
                 + `${got.l1}一級／${got.l2}二級／${got.detail}明細／`
                 + `${got.totalCost}總經費／${repairs.length}自動修復｜`
-                + `共${got.rows}列｜四層驗算0不符`,
+                + `共${got.rows}列｜四層驗算0不符｜工作計畫核對 ${agencyCheck ? `${agencyCheck.checked}/${agencyCheck.total}，不符 ${agencyCheck.issues.length}` : '無機關別表'}`,
             );
         }
     } catch (error) {

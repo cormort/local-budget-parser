@@ -309,6 +309,7 @@
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js';
     
     let _unitAgency = '', _rows = [], _issues = [], _repairs = [];
+    let _agencyCheck = null;   // 工作計畫核對結果；null＝這份 PDF 沒有歲出機關別預算表
     
     if (typeof globalThis !== 'undefined') {
       globalThis.detectedAgency = () => _unitAgency;
@@ -605,6 +606,116 @@
       return rows;
     }
     
+    // ===== 歲出機關別預算表：工作計畫的獨立對照來源 =====
+    // 四層加總驗算是自我一致性檢查——最頂端的工作計畫預算數就取自概況表自己的表頭，
+    // 整條鏈沒有外部依據。同一本預算書的「歲出機關別預算表」以款項目節列出相同的工作計畫
+    // 編號、名稱與本年度預算數（千元），拿它當外部基準才驗得到那個頂端數字。
+    // 臺北市把表名印成「歲出預算表」，故用 regex 而非固定字串。
+    const _AGENCY_TITLE_RE = /歲出(機關別)?預算表/;
+
+    async function parseAgencyPlanTable(pdf, onProgress) {
+      const map = new Map();
+      let pages = 0;
+      for (let i = 1; i <= pdf.numPages; i++) {
+        if (onProgress) onProgress(i, pdf.numPages);
+        const tc = await (await pdf.getPage(i)).getTextContent();
+        const flat = tc.items.map(t => t.str).join('').replace(/[\s　]/g, '');
+        if (!_AGENCY_TITLE_RE.test(flat)) continue;
+        if (/目\s*次|第\d+頁至第/.test(flat)) continue;   // 目次頁也含表名，但沒有資料列
+        pages++;
+        const ws = tc.items.map(t => ({ x: t.transform[4], y: t.transform[5], s: t.str })).filter(w => w.s.trim());
+        const lines = [];
+        for (const w of ws.sort((a, b) => b.y - a.y)) {
+          const g = lines[lines.length - 1];
+          if (g && Math.abs(g.y - w.y) <= 3) g.w.push(w); else lines.push({ y: w.y, w: [w] });
+        }
+        lines.forEach(l => l.w.sort((a, b) => a.x - b.x));
+        // 「本年度預算數」欄 x（表頭「本年度」出現兩次：預算數欄與比較欄，取靠左者）
+        const hd = lines.flatMap(l => l.w).filter(w => w.s.replace(/[\s　]/g, '').startsWith('本年度'));
+        const xB = hd.length ? Math.min(...hd.map(w => w.x)) : null;
+        // PDFium 會把同一列的三個年度金額併成一個 item（"734,852 655,558 499,706 "），
+        // 依空白拆開後第一段＝本年度預算數（欄序為 本年度／上年度／前年度）
+        const numParts = w => w.s.trim().split(/\s+/).filter(t => /^-?[\d,]+$/.test(t));
+        const isNum = w => numParts(w).length > 0 && !/[^-\d,\s]/.test(w.s.trim());
+        // 款項目節的層級號有時與代碼黏成同一個 item（高雄「01 　　　32020110101」），
+        // 取最後一段空白分隔的 token 才拿得到代碼本身
+        const codeOf = w => {
+          const t = w.s.trim().split(/\s+/).pop().replace(/[\s　]/g, '');
+          return /^\d{10,11}$/.test(t) ? t : null;
+        };
+        const uniq = a => [...new Map(a.map(w => [Math.round(w.x) + '|' + w.s, w])).values()];
+        for (let k = 0; k < lines.length; k++) {
+          const cw = lines[k].w.find(w => codeOf(w) && (xB == null || w.x < xB - 10));
+          if (!cw) continue;
+          const code = codeOf(cw), codeX = cw.x;
+          const nameCol = w => !isNum(w) && !codeOf(w) && w.x > codeX - 25 && w.x < (xB ?? 170) - 10;
+          const amtOf = l => {
+            const n = l.w.filter(w => isNum(w) && w.x >= codeX - 5);
+            return (xB != null && n.find(w => Math.abs(w.x - xB) < 45)) || n[0];
+          };
+          // 版面有兩種：代碼與金額同一列、名稱在下一列（地方版），
+          // 或代碼獨佔一列、名稱與金額都在下一列（中央版）。兩種都吃。
+          let b = amtOf(lines[k]);
+          let name = uniq(lines[k].w.filter(nameCol)).map(w => w.s).join('').replace(/[\s　]/g, '');
+          let start = k + 1;
+          if (!b && lines[k + 1]) b = amtOf(lines[k + 1]);
+          if (!name && lines[k + 1]) {
+            name = uniq(lines[k + 1].w.filter(nameCol)).map(w => w.s).join('').replace(/[\s　]/g, '');
+            start = k + 2;
+          }
+          // 名稱欄寬不夠時折到後續行（「新北市政府家庭暴」→「力暨性侵害防治中」→「心」）
+          for (let j = start; j < lines.length; j++) {
+            if (lines[j].w.some(w => codeOf(w)) || lines[j].w.some(w => isNum(w) && w.x >= codeX - 5)) break;
+            const c = uniq(lines[j].w.filter(nameCol)).map(w => w.s).join('').replace(/[\s　]/g, '');
+            if (!c) break;
+            name += c;
+          }
+          if (!map.has(code)) map.set(code, { name, budget: numParts(b || { s: '' })[0] || '' });
+        }
+      }
+      return { map, pages };
+    }
+
+    function _planNameKey(s) { return (s || '').replace(/[\s　,，、。．.\-－–—‧･·()（）]/g, ''); }
+
+    // 包含關係「有方向」，意義相反，不可混為一談：
+    //   機關別表名稱 ⊂ 概況表名稱 → 機關別表被欄寬截斷，正常
+    //   概況表名稱 ⊂ 機關別表名稱 → 概況表這側名稱不完整＝解析漏字，要報出來
+    // 臺中市實測抓到 3 筆（「導執行」應為「總預算編審與督導執行」），對稱規則會放過。
+    function _planNameIssue(agencyName, planName) {
+      const x = _planNameKey(agencyName), y = _planNameKey(planName);
+      if (!x) return 'noname';
+      if (x === y) return '';
+      if (y.includes(x)) return '';
+      if (x.includes(y)) return 'short';
+      return 'diff';
+    }
+
+    // 概況表的工作計畫 vs 機關別表。回傳 { checked, issues }。
+    // 刻意「不」把『概況表有、機關別表沒有』當成錯誤：新北市有 7 個代碼含字母的計畫
+    // （8970a010401 等）屬另一款別，本來就不列在這張表裡，報出來全是假警報。
+    // 改為回報涵蓋率，讓使用者自己看核對到幾個。
+    function crossCheckAgencyPlans(rows, agency) {
+      const plans = new Map();
+      for (const r of rows) if (r.planCode && !plans.has(r.planCode)) plans.set(r.planCode, { name: r.planName, budget: r.planBudget });
+      const issues = [];
+      let checked = 0, noName = 0;
+      for (const [code, p] of plans) {
+        const a = agency.map.get(code);
+        if (!a) continue;
+        checked++;
+        // 概況表的 planBudget 單位是元，機關別表是千元
+        const av = a.budget ? parseInt(a.budget.replace(/,/g, ''), 10) * 1000 : null;
+        if (av === null) issues.push({ code, kind: '金額未取得', plan: p.name, a: '(未取得)', b: _fmt(+p.budget) });
+        else if (av !== +p.budget) issues.push({ code, kind: '本年度預算數不符', plan: p.name, a: _fmt(av), b: _fmt(+p.budget) });
+        const ni = _planNameIssue(a.name, p.name);
+        if (ni === 'noname') noName++;
+        else if (ni === 'short') issues.push({ code, kind: '概況表名稱不完整', plan: p.name, a: a.name, b: p.name });
+        else if (ni) issues.push({ code, kind: '名稱對不上', plan: p.name, a: a.name, b: p.name });
+      }
+      return { total: plans.size, checked, noName, issues };
+    }
+
     async function parseLocalDoc(pdf, onProgress) {
       const out = [];
       let plan = null, br = null, l1 = null, acct = null, totalMode = false;
@@ -1124,17 +1235,27 @@
       try {
         const pdf = await pdfjsLib.getDocument({ data }).promise;
         _rows = await parseLocalDoc(pdf, (i, n) => msg.textContent = `解析中… ${i}/${n}`);
-        let engine = 'pdf.js';
-        
+        let engine = 'pdf.js', doc = pdf, fake = null;
+
         if (!_rows.length) {
           msg.textContent = 'pdf.js 無法解讀，改用 PDFium…';
           const lib = await _loadPdfium();
-          const fake = _pdfiumFakeDoc(lib, data);
+          fake = _pdfiumFakeDoc(lib, data);
           _rows = await parseLocalDoc(fake, (i, n) => msg.textContent = `PDFium 解析中… ${i}/${n}`);
-          fake.destroy();
+          doc = fake;
           engine = 'PDFium';
         }
-        
+
+        // 工作計畫核對要用「解析成功的那個引擎」的同一份 doc，故在 destroy 之前跑
+        try {
+          const ag = _rows.length
+            ? await parseAgencyPlanTable(doc, (i, n) => msg.textContent = `核對歲出機關別預算表 ${i}/${n}…`)
+            : { map: new Map(), pages: 0 };
+          _agencyCheck = ag.pages ? crossCheckAgencyPlans(_rows, ag) : null;
+        } finally {
+          if (fake) fake.destroy();
+        }
+
         if (!_rows.length) throw Error('找不到可解析的費用明細表');
         
         _filter.plan = _filter.branch = _filter.acct = _filter.level = _filter.q = '';
@@ -1234,6 +1355,23 @@
         reconLine = '<p class="ok">✅ 四層加總驗算全數通過（明細→科目→分支→工作計畫）</p>';
       }
       
+      // 工作計畫核對：上面那條驗算只證明概況表自己前後一致，這條才有外部依據
+      if (!_agencyCheck) {
+        reconLine += `<p class="note">ℹ️ 這份 PDF 沒有解析到「歲出機關別預算表」，略過工作計畫核對（上方驗算僅為自我一致性檢查）。</p>`;
+      } else {
+        const c = _agencyCheck;
+        const cover = `${c.checked}/${c.total} 個工作計畫`
+          + (c.checked < c.total ? `（另 ${c.total - c.checked} 個不在該表的款別內，屬正常）` : '')
+          + (c.noName ? `，其中 ${c.noName} 個在該表抽不到名稱、略過名稱比對` : '');
+        if (!c.issues.length) {
+          reconLine += `<p class="ok">✅ 工作計畫核對通過：${cover} 的編號、名稱與本年度預算數皆與歲出機關別預算表相符</p>`;
+        } else {
+          const li = c.issues.map(x =>
+            `${esc(x.kind)}｜${esc(x.code)}：機關別預算表「${esc(x.a)}」；本表「${esc(x.b)}」`).join('<br>');
+          reconLine += `<div class="recon bad">⚠ 工作計畫核對有 ${c.issues.length} 處不符（已核對 ${cover}）：<br>${li}</div>`;
+        }
+      }
+
       if (_repairs.length) {
         reconLine += `<p class="note">ℹ 已自動修復 ${_repairs.length} 筆疑似欄位黏連金額；匯出資料會保留「原始預算數」供複核。</p>`;
       }
