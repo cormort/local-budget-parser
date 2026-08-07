@@ -79,7 +79,7 @@ function checkPlanBudgetConsistent(rows) {
 // ── blocker：欄位形狀 ──
 // 名稱欄混進表格內文或說明文字＝抽取越界。這些特徵字不可能出現在合法的計畫/科目名裡。
 // 「合計」不可裸用：中央版實測「辦理戶政綜**合計**畫及研習活動」跨詞邊界誤中，那是合法名稱。
-const NAME_POISON = /千元|歲出計畫說明|說明合計|合計\d|計畫內容|項目內容|預算數|承辦單位|如下[：:]/;
+const NAME_POISON = /千元|歲出計畫說明|說明合計|合計\d|計畫內容|項目內容|預算數|承辦單位|名稱與編號|業務計畫及工作計畫|如下[：:]/;
 function checkFieldShape(rows) {
     const v = [];
     const seen = new Set();

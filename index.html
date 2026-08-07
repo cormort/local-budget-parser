@@ -822,13 +822,18 @@
           //   y=702 x=133 「區）之各項補助-對鄉（鎮、市、」
           //   y=690 x=133 「直轄市山地原住民區）之各項補助」
           // 只收 x 對齊代碼的那幾段會掉頭（實測新北 8970a010401 變成「區）之各項補助-…」）。
-          const _LAB = '業務計畫及工作計畫';
+          // 欄位標籤有兩行，名稱可能黏在任一行後面（實測臺北市追加預算黏在「名稱與編號」後）
+          const _LABS = ['業務計畫及工作計畫', '名稱與編號'];
           let head = '';
-          const labW = ws.find(w => _strip(w.s).startsWith(_LAB));
-          if (labW) {
-            const rest = _strip(labW.s).slice(_LAB.length);
+          // 兩個標籤有時併成同一個 item（「業務計畫及工作計畫名稱與編號」），剝掉一個還會剩另一個，
+          // 故反覆剝到沒有標籤前綴為止；剝完是空的就代表那個 item 純粹是標籤、不含名稱。
+          const _stripLabs = t => { let x = t, prev; do { prev = x; for (const l of _LABS) if (x.startsWith(l)) x = x.slice(l.length); } while (x !== prev); return x; };
+          for (const lab of _LABS) {
+            const labW = ws.find(w => _strip(w.s).startsWith(lab) && _strip(w.s).length > lab.length);
+            if (!labW) continue;
+            const rest = _stripLabs(_strip(labW.s));
             // 標籤後面接的若是代碼本身（新北「業務計畫及工作計畫62111100101」）就不是名稱
-            if (rest && /[一-鿿]/.test(rest) && !_PLAN_CODE.test(rest)) head = rest;
+            if (rest && /[一-鿿]/.test(rest) && !_PLAN_CODE.test(rest)) { head = rest; break; }
           }
           // 名稱區塊的下界＝「一、計畫內容／項目內容」那一行。只靠「條列標號開頭」擋不住：
           // 計畫內容的句子換行後，續行沒有標號且剛好也對齊名稱欄，會被一路吃進來
@@ -843,7 +848,8 @@
               .sort((a, b) => b.y - a.y)) {
               const t = w.s.trim();
               if (_NAME_STOP.test(t) || !/[一-鿿]/.test(t)) break;
-              name += t;
+              // 欄位標籤本身不是名稱的一部分（實測「名稱與編號接受中央補助支出-…」）
+              name += _stripLabs(t);
             }
           }
           if (!name) {
