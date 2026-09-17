@@ -1379,6 +1379,27 @@
       document.querySelectorAll('.btn-sec').forEach(b => { b.disabled = busy; });
     }
 
+    // pdf.js 只認得 CJK 字型的字元對應表（CMap）才讀得出內文。地方政府預算書大量使用
+    // 2-byte CID 字型（Adobe-CNS1／ETen-B5 等），沒有 CMap 時整個字元流解不出來——實測
+    // 高雄市、新北市、新北市社會局三份會變成 0 列，只好退回較弱的 PDFium。
+    // 這裡用同源自帶的 cmaps/（pdfjs-dist 2.10.377 原封不動），內網、離線都快取得到；
+    // 直接開本機檔案（file://）時相對路徑會被 CORS 擋掉，改指向 CDN 的同一份 CMap。
+    const _CMAP_URL = location.protocol === 'file:'
+      ? 'https://cdn.jsdelivr.net/npm/pdfjs-dist@2.10.377/cmaps/'
+      : new URL('cmaps/', location.href).href;
+
+    // 引擎評分：先比「四層驗算對不上的筆數」（自己算得平的最可信），再比列數。
+    // 這條規則寫在這裡而不是散在各處，是為了讓 node 端的測試與批次稽核呼叫同一支，
+    // 避免驗證腳本自行複寫「該用哪個引擎」而與實際行為漂移。
+    function _engineRank(rows) {
+      return [rows.length ? reconcile(rows).length : Infinity, -rows.length];
+    }
+    function _isBetterEngine(cand, best) {
+      const a = _engineRank(cand), b = _engineRank(best);
+      if (a[0] !== b[0]) return a[0] < b[0];
+      return a[1] < b[1];
+    }
+
     async function _parse(data) {
       const msg = document.getElementById('msg');
       const token = ++_parseToken;
@@ -1388,18 +1409,43 @@
       try {
         _setBusy(true);                         // 放在 try 內，出錯時才會走到 finally 的釋放
         if (typeof pdfjsLib === 'undefined') throw Error('pdf.js 未載入（CDN 被封鎖或離線），請重新整理後再試');
-        pdf = await pdfjsLib.getDocument({ data }).promise;
-        let rows = await parseLocalDoc(pdf, (i, n) => { if (!stale()) msg.textContent = `解析中… ${i}/${n}`; });
-        let engine = 'pdf.js', doc = pdf;
-
-        if (!rows.length) {
-          msg.textContent = 'pdf.js 無法解讀，改用 PDFium…';
-          const lib = await _loadPdfium();
-          fake = _pdfiumFakeDoc(lib, data);
-          rows = await parseLocalDoc(fake, (i, n) => { if (!stale()) msg.textContent = `PDFium 解析中… ${i}/${n}`; });
-          doc = fake;
-          engine = 'PDFium';
+        pdf = await pdfjsLib.getDocument({ data, cMapUrl: _CMAP_URL, cMapPacked: true }).promise;
+        let rows = [], pdfjsError = null;
+        try {
+          rows = await parseLocalDoc(pdf, (i, n) => { if (!stale()) msg.textContent = `解析中… ${i}/${n}`; });
+        } catch (e) {
+          pdfjsError = e;    // 讀到一半炸掉也要讓 PDFium 有機會接手，不能直接放棄整個檔案
         }
+        let engine = 'pdf.js', doc = pdf;
+        let repairs = _repairs, repairNotes = _repairNotes;
+
+        // 退回 PDFium 的時機有三個：pdf.js 完全讀不出東西、讀到一半例外、或是讀出來的東西
+        // 自己對不上（四層驗算不符＝有金額被分錯層或漏讀）。最後一種原本不會退，
+        // 於是「有資料但算不平」的結果照樣上畫面——那比讀不出來更危險。
+        if (!rows.length || reconcile(rows).length) {
+          msg.textContent = rows.length ? 'pdf.js 結果對不上，改用 PDFium 複核…' : 'pdf.js 無法解讀，改用 PDFium…';
+          try {
+            const lib = await _loadPdfium();
+            fake = _pdfiumFakeDoc(lib, data);
+            const altRows = await parseLocalDoc(fake, (i, n) => { if (!stale()) msg.textContent = `PDFium 解析中… ${i}/${n}`; });
+            if (altRows.length && _isBetterEngine(altRows, rows)) {
+              rows = altRows; doc = fake; engine = 'PDFium';
+              repairs = _repairs; repairNotes = _repairNotes;
+            } else {
+              _repairs = repairs; _repairNotes = repairNotes;   // 保留 pdf.js 的修復紀錄
+              try { if (fake.destroy) fake.destroy(); } catch (err) { /* 已經釋放過 */ }
+              fake = null;
+            }
+          } catch (e) {
+            // PDFium 載不到（模組被 CDN 政策擋掉、離線）時，pdf.js 有讀到東西就先用，
+            // 沒讀到才是真的失敗。表列的驗算警示會照樣顯示，不會假裝沒問題。
+            _repairs = repairs; _repairNotes = repairNotes;
+            if (fake) { try { if (fake.destroy) fake.destroy(); } catch (err) { /* 已經釋放過 */ } fake = null; }
+            if (!rows.length) throw e;
+            engine += '（PDFium 無法載入，未複核）';
+          }
+        }
+        if (!rows.length && pdfjsError) throw pdfjsError;
 
         if (stale()) return;                    // 使用者已改點別的檔案：不必再花一整趟跑機關別表
         // 工作計畫核對要用「解析成功的那個引擎」的同一份 doc，故在 destroy 之前跑
@@ -1416,7 +1462,9 @@
         _agencyCheck = agencyCheck;
         _filter.plan = _filter.branch = _filter.acct = _filter.level = _filter.q = '';
         document.getElementById('exportBtns').style.display = '';
-        msg.textContent = `完成：${_rows.length} 列（機關：${_unitAgency || '未偵測'}｜引擎：${engine}｜自動修復：${_repairs.length}筆）`;
+        const nBad = reconcile(_rows).length;   // 兩個引擎都對不上時，至少要在最上面就看得出來
+        msg.textContent = `完成：${_rows.length} 列（機關：${_unitAgency || '未偵測'}｜引擎：${engine}`
+          + `｜自動修復：${_repairs.length}筆${nBad ? `｜⚠ 四層驗算不符 ${nBad} 處` : ''}）`;
         render();
       } catch (e) {
         if (stale()) return;

@@ -9,7 +9,9 @@
 // 判定一律由本檔的確定性規則做，不交給人或 agent 目測——目測會漏、會累、會編。
 // 檢查分兩級：
 //   blocker：違反即為 bug，無需 ground truth 就能斷定（如上下層加總不符、同一計畫兩種預算數）
-//   warn   ：品質指標超出區間，可能是資料本身的限制，需人工判讀（如孤兒句比例過高）
+//   warn   ：品質指標超出區間，可能是資料本身的限制，需人工判讀（如孤兒句比例過高），
+//            以及四層驗算看不到的準確度指標：數量×單價≠預算數、金額不在它宣稱的頁面、
+//            疑似同一行重複計列、兩個引擎的結果不一致
 // 退出碼：有任何 blocker → 1；只有 warn → 0。CI 與 agent 都靠這個判斷。
 
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.js';
@@ -24,9 +26,18 @@ import vm from 'node:vm';
 // 上界取自六個機關的實測最差值再放寬，不是憑感覺訂的：
 //   孤兒句比例最高為教育部 446/1313 = 34%（其說明按單位而非按科目撰寫，屬資料限制）
 const WARN = {
+    // 以下兩個準確度指標在七份樣本皆為 0，是目前的水準線；一旦出現代表欄位或頁碼開始跑掉
+    qtyPriceViolation: 0,    // 明細列「數量×單價≠預算數」的筆數
+    pageProvenanceViolation: 0,  // 明細列金額不在宣稱頁面／疑似同一行重複計列的筆數
     unmatchedRate: 0.10,     // 在機關別預算表找不到對應編號的工作計畫比例（七份實測現為 0）
     detailPerL2: 0.5,        // 明細列 / 二級科目列。低於此代表明細層多半沒讀到
 };
+
+// index.html 會用 new URL('cmaps/', location.href) 決定 CMap 來源，而 createObjectURL
+// 只有瀏覽器有：用真正的 URL 建構子（瀏覽器兩個都有）補上這兩個靜態方法。
+const URL_SHIM = globalThis.URL;
+URL_SHIM.createObjectURL = () => '';
+URL_SHIM.revokeObjectURL = () => { };
 
 function loadTool(html) {
     const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)];
@@ -34,9 +45,10 @@ function loadTool(html) {
     const stub = { files: { length: 0 }, style: {}, value: '', textContent: '', innerHTML: '', addEventListener() { }, click() { }, setAttribute() { }, getBoundingClientRect: () => ({ height: 30 }) };
     const ctx = {
         console: { log() { }, warn() { }, error() { } },   // 解析過程的雜訊不進報告
-        document: { getElementById: () => stub, createElement: () => ({ ...stub }), querySelector: () => null },
+        document: { getElementById: () => stub, createElement: () => ({ ...stub }), querySelector: () => null, querySelectorAll: () => [] },
         window: {}, pdfjsLib: { GlobalWorkerOptions: {} },
-        URL: { createObjectURL: () => '', revokeObjectURL() { } }, Blob: function () { },
+        location: { protocol: 'http:', href: 'http://127.0.0.1:8963/index.html' },
+        URL: URL_SHIM, Blob: function () { },
         setTimeout, clearTimeout, Uint8Array, ArrayBuffer, Map, Set,
     };
     ctx.globalThis = ctx;
@@ -45,17 +57,38 @@ function loadTool(html) {
     return ctx;
 }
 
-// 部分縣市的內文字型 pdf.js 讀不出來，工具本身會退回 PDFium；稽核必須走同一條路徑，
-// 否則會把「pdf.js 讀不到」誤報成「解析不出資料列」。
+// 引擎鏈與 index.html 的 _parse 相同：pdf.js（帶自帶 CMap）先跑，讀不出來、例外或四層驗算
+// 對不上時讓 PDFium 複核，取捨用 index.html 的 _engineRank／_isBetterEngine 決定。
+// 稽核若自行決定「用哪個引擎」，就會與實際行為漂移——這正是本檔開頭警告的那件事。
+const CMAP_DIR = new URL('cmaps/', import.meta.url).pathname;
 let _pdfiumLib = null;
 async function openPdf(ctx, data) {
-    const pdf = await getDocument({ data: new Uint8Array(data) }).promise;
-    const rows = await ctx.parseLocalDoc(pdf);
-    if (rows.length) return { pdf, rows, engine: 'pdf.js' };
-    try { await pdf.destroy(); } catch { }
-    if (!_pdfiumLib) { _pdfiumLib = await pdfiumInit(); _pdfiumLib.PDFiumExt_Init(); }
-    const fake = ctx._pdfiumFakeDoc(_pdfiumLib, new Uint8Array(data));
-    return { pdf: fake, rows: await ctx.parseLocalDoc(fake), engine: 'PDFium' };
+    const bytes = new Uint8Array(data);
+    const cands = [];
+    let pdf = null;
+    try {
+        pdf = await getDocument({ data: Uint8Array.from(bytes), cMapUrl: CMAP_DIR, cMapPacked: true }).promise;
+        cands.push({ engine: 'pdf.js', pdf, rows: await ctx.parseLocalDoc(pdf) });
+    } catch (e) {
+        if (pdf) { try { await pdf.destroy(); } catch { } }
+        cands.push({ engine: 'pdf.js', pdf: null, rows: [], error: String(e && e.message || e) });
+    }
+    const best = cands[0];
+    if (!best.rows.length || ctx._engineRank(best.rows)[0] > 0) {
+        if (!_pdfiumLib) { _pdfiumLib = await pdfiumInit(); _pdfiumLib.PDFiumExt_Init(); }
+        const fake = ctx._pdfiumFakeDoc(_pdfiumLib, Uint8Array.from(bytes));
+        let altRows = [];
+        try { altRows = await ctx.parseLocalDoc(fake); } catch { altRows = []; }
+        if (altRows.length && ctx._isBetterEngine(altRows, best.rows)) {
+            if (best.pdf) { try { await best.pdf.destroy(); } catch { } }
+            best.engine = 'PDFium'; best.pdf = fake; best.rows = altRows;
+        } else {
+            try { fake.destroy(); } catch { }
+        }
+    }
+    best.candidates = cands.map(c => ({ engine: c.engine, rows: c.rows.length, mismatches: c.rows.length ? ctx.reconcile(c.rows).length : null, error: c.error || null }));
+    if (!best.pdf) throw Error('兩個引擎都無法開啟這份 PDF');
+    return best;
 }
 
 const n = v => +String(v ?? '').replace(/,/g, '');
@@ -97,6 +130,77 @@ function checkFieldShape(rows) {
     return v;
 }
 
+// 數量欄實際寫法有「362×12」（362 人×12 月）這種算式，不能拔掉非數字直接取值。
+function evalQty(s) {
+    const t = String(s ?? '').replace(/[,\s]/g, '').replace(/[xX*＊✕]/g, '×').replace(/[－ー–—]/g, '-');
+    if (!t || !/^[\d.]+(?:[×\-/][\d.]+)*$/.test(t)) return null;
+    const parts = t.split(/([×\-/])/);
+    let acc = parseFloat(parts[0]);
+    if (!Number.isFinite(acc)) return null;
+    for (let i = 1; i < parts.length; i += 2) {
+        const v = parseFloat(parts[i + 1]);
+        if (!Number.isFinite(v)) return null;
+        if (parts[i] === '×') acc *= v; else if (parts[i] === '-') acc -= v; else acc /= v;
+    }
+    return acc;
+}
+
+// ── warn：數量 × 單價 = 預算數 ──
+// 欄位互證：與表格結構無關，只有數量、單價、預算數三者都被分到正確的欄才會成立；
+// 欄位黏連或誤判（例如把單價讀成數量）都會在這裡現形。單價可能是四捨五入後的値
+// （實測 1.5×52301 → 78451.5 印成 78452），故容許四捨五入到整數元。
+function checkQtyPrice(rows) {
+    const v = [];
+    for (const r of rows) {
+        if (r.level !== '明細' || !r.qty || !r.price || r.amount === '') continue;
+        const q = evalQty(r.qty), p = n(r.price), a = n(r.amount);
+        if (q == null || !Number.isFinite(p) || !Number.isFinite(a)) continue;
+        if (Math.round(q * p) !== Math.round(a)) {
+            v.push({ kind: '數量×單價≠預算數', detail: `${r.planCode}/${r.branchCode}/${r.l2Code || r.l1Code} 第 ${r.page} 頁：${r.qty} × ${r.price} = ${+(q * p).toFixed(2)}，表列 ${r.amount}` });
+        }
+    }
+    return v;
+}
+
+// ── warn：金額是否真的印在它宣稱的那一頁 ──
+// 頁碼是使用者回查原文的依據；這條用另一個方向的抽取（整頁文字）反證列的出處。
+// 只驗明細列（金額以元為單位印出）；計畫說明列印的是「千元」故不適用。
+// 重複列另外驗：同一組 (計畫, 科目, 金額, 頁) 出現兩次時，該頁文字必須也出現兩次，
+// 否則就是同一行被讀了兩次（四層驗算若剛好被別的誤讀抵銷就會一路通過）。
+async function checkPageProvenance(pdf, rows) {
+    const pages = [...new Set(rows.filter(r => r.level === '明細' && r.page).map(r => r.page))];
+    const text = new Map();
+    for (const p of pages) {
+        try {
+            const pg = await pdf.getPage(p);
+            const tc = await pg.getTextContent();
+            text.set(p, tc.items.map(i => i.str).join('').replace(/[\s,，]/g, ''));
+        } catch { text.set(p, null); }
+    }
+    const v = [];
+    const seen = new Map();
+    for (const r of rows) {
+        if (r.level !== '明細' || !r.page) continue;
+        const t = text.get(r.page);
+        if (t == null) continue;
+        const amt = String(r.originalAmount ?? r.amount).replace(/[\s,，]/g, '');
+        if (!amt) continue;                       // 沒有金額的明細列（純說明列）不適用這條
+        const hits = t.split(amt).length - 1;
+        if (!hits) {
+            v.push({ kind: '金額不在宣稱的頁面', detail: `${r.planCode}/${r.branchCode}/${r.l2Code || r.l1Code} 第 ${r.page} 頁找不到 ${r.amount}「${String(r.desc || '').slice(0, 20)}」` });
+        }
+        const key = [r.planCode, r.branchCode, r.l2Code || r.l1Code, amt, r.page].join('|');
+        if (seen.has(key)) {
+            if (hits < 2) {
+                v.push({ kind: '疑似同一行重複計列', detail: `第 ${r.page} 頁 ${amt} 只出現 ${hits} 次，卻有兩列明細` });
+            }
+        } else {
+            seen.set(key, 1);
+        }
+    }
+    return v;
+}
+
 async function auditOne(html, file, toolVersion) {
     const t0 = Date.now();
     const rec = { file, tool: 'local-budget-parser', toolVersion, ok: false, blockers: [], warnings: [] };
@@ -132,6 +236,24 @@ async function auditOne(html, file, toolVersion) {
 
         const shape = checkFieldShape(rows);
         if (shape.length) rec.blockers.push({ check: 'fieldShape', count: shape.length, sample: shape.slice(0, 8) });
+
+        // 準確度指標：欄位互證與頁碼出處。這兩項不影響「加總對不對」，但會抓到
+        // 「數字算得平、欄位卻是錯的」與「頁碼指錯頁」這種四層驗算看不到的錯。
+        const qp = checkQtyPrice(rows);
+        rec.accuracy = { qtyPriceChecked: rows.filter(r => r.level === '明細' && r.qty && r.price).length, qtyPriceViolations: qp.length };
+        if (qp.length) rec.warnings.push({ check: 'qtyPrice', count: qp.length, sample: qp.slice(0, 5), detail: '數量×單價與預算數不符（可能是欄位誤判，或原表單價為四捨五入値）' });
+
+        const prov = await checkPageProvenance(pdf, rows);
+        rec.accuracy.pageProvenanceViolations = prov.length;
+        if (prov.length) rec.warnings.push({ check: 'pageProvenance', count: prov.length, sample: prov.slice(0, 5), detail: '金額不在它宣稱的頁面／疑似同一行重複計列' });
+
+        // 兩個引擎都讀得出東西時，記下它們是否一致（差異本身就是要看的訊號）
+        const cands = (opened.candidates || []).filter(c => c.rows);
+        if (cands.length > 1) {
+            const same = cands.every(c => c.rows === cands[0].rows && c.mismatches === cands[0].mismatches);
+            rec.engineAgreement = { same, candidates: cands };
+            if (!same) rec.warnings.push({ check: 'engineAgreement', detail: '兩個引擎的列數或驗算結果不同：' + JSON.stringify(cands), sample: cands });
+        }
 
         const ag = await ctx.parseAgencyPlanTable(pdf);
         rec.counts.agencyTablePages = ag.pages;
