@@ -4,11 +4,13 @@
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.js';
 import { init as pdfiumInit } from '@embedpdf/pdfium';
 import { access, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import vm from 'node:vm';
 
 const EXPECT = {
     '臺北市': {
         file: 'examples/taipei-116.pdf',
+        engine: 'pdf.js',
         agency: '臺北市政府主計處',
         plans: 4,
         branches: 14,
@@ -20,6 +22,7 @@ const EXPECT = {
     },
     '臺中市': {
         file: 'examples/taichung-115.pdf',
+        engine: 'pdf.js',
         agency: '臺中市政府主計處',
         plans: 7,
         branches: 5,
@@ -29,12 +32,12 @@ const EXPECT = {
         rows: 267,
         agencyTable: { pages: 2, checked: 7, issues: 0, unmatched: 0 },
     },
-    // 以下兩份的內文字型 pdf.js 無法解讀，改走 PDFium 後備引擎。
-    // 引擎載入是 Node.js 測試環境的膠水；字元流轉換與偽文件物件
-    // 均直接使用 index.html 內的 _pdfiumFakeDoc()，不在測試中複寫。
+    // 以下三份的內文字型是 2-byte CID（Adobe-CNS1／ETen-B5…）：沒有 CMap 時 pdf.js
+    // 會整份讀不出來（0 列）而退回 PDFium。自帶 cmaps/ 之後 pdf.js 讀得完，且結果與
+    // PDFium 一致或更好，因此預期引擎改為 pdf.js；PDFium 後備路徑另見 FALLBACK_CASE。
     '高雄市': {
         file: 'examples/kaohsiung-115.pdf',
-        engine: 'pdfium',
+        engine: 'pdf.js',
         agency: '高雄市政府主計處',
         plans: 4,
         branches: 8,
@@ -46,14 +49,16 @@ const EXPECT = {
     },
     '新北市': {
         file: 'examples/newtaipei-115.pdf',
-        engine: 'pdfium',
+        engine: 'pdf.js',
         agency: '新北市政府主計處',
         plans: 11,
         branches: 6,
         l1: 21,
         l2: 50,
         detail: 89,
-        rows: 177,
+        // pdf.js + CMap 讀到 180 列：比 PDFium 多 3 列「計畫說明」（8970a010401 經常／資本門
+        // 與 7670a030201），三列的金額都與來源頁面及機關別預算表核對相符，是 PDFium 漏讀。
+        rows: 180,
         agencyTable: { pages: 4, checked: 11, issues: 0, unmatched: 0 },
     },
     // 主管單位預算（社會局＋所屬 5 機關，341 頁）。說明欄有大量公文字號，是
@@ -63,6 +68,7 @@ const EXPECT = {
     // 是「案別不能只認破折號」這條規則的實證：只認破折號時案小計會被算進上一個科目。
     '臺北市新工處': {
         file: 'examples/taipei-newworks-116.pdf',
+        engine: 'pdf.js',
         agency: '臺北市政府工務局新建工程處',
         plans: 4,
         branches: 17,
@@ -77,7 +83,7 @@ const EXPECT = {
     },
     '新北市政府社會局': {
         file: 'examples/newtaipei-social-115.pdf',
-        engine: 'pdfium',
+        engine: 'pdf.js',
         agency: '新北市政府社會局',
         plans: 15,
         branches: 37,
@@ -121,9 +127,23 @@ const SOCIAL_CASE = {
     file: 'examples/taipei-social-116.pdf',
     agency: '臺北市政府社會局',
     agencyTable: { pages: 5, checked: 7, issues: 0, unmatched: 0 },
+    engine: 'pdf.js',
 };
 
+// index.html 會用 new URL('cmaps/', location.href) 決定 CMap 來源，而 createObjectURL
+// 只有瀏覽器有：用真正的 URL 建構子（瀏覽器兩個都有）補上這兩個靜態方法。
+const URL_SHIM = globalThis.URL;
+URL_SHIM.createObjectURL = () => '';
+URL_SHIM.revokeObjectURL = () => { };
+
 let _pdfiumLib = null;
+
+// 地方政府預算書的內文字型大量使用 2-byte CID（Adobe-CNS1／ETen-B5…）。pdf.js 沒有
+// CMap 字元對應表時，整份文件的字元流解不出來（實測高雄市、新北市、新北市社會局
+// 會變成 0 列，只能退回 PDFium）。這裡指到 repo 內自帶的同源 cmaps/。
+const CMAP_DIR = new URL('cmaps/', import.meta.url).pathname;
+// 測試替身模擬的部署位置，用來驗 _CMAP_URL 算出來是不是同源 cmaps/。
+const SITE_URL = 'http://127.0.0.1:8963/index.html';
 
 function extractInlineScript(html) {
     // 排除 <script src="...">，只取實際包含解析核心的內嵌 script。
@@ -158,10 +178,8 @@ function loadTool(html) {
         },
         window: {},
         pdfjsLib: { GlobalWorkerOptions: {} },
-        URL: {
-            createObjectURL: () => '',
-            revokeObjectURL() {},
-        },
+        location: { protocol: 'http:', href: SITE_URL },
+        URL: URL_SHIM,
         Blob: function Blob() {},
         setTimeout,
         clearTimeout,
@@ -227,25 +245,59 @@ async function openPdf(ctx, data, engine) {
         }
         return ctx._pdfiumFakeDoc(_pdfiumLib, data);
     }
-    return getDocument({ data }).promise;
+    return getDocument({ data, cMapUrl: CMAP_DIR, cMapPacked: true }).promise;
+}
+
+// 與 index.html 的 _parse 同一條引擎鏈：pdf.js（帶 CMap）先跑，讀不出來、讀到一半例外
+// 或四層驗算對不上時，才讓 PDFium 複核，並用 index.html 的 _isBetterEngine 決定留誰。
+// 評分規則不在此複寫，否則驗證腳本會與實際行為漂移。
+async function parseBest(ctx, data, prefer = 'pdf.js') {
+    const out = { engine: 'pdf.js', rows: [], error: null };
+    if (prefer === 'pdf.js') {
+        const pdf = await openPdf(ctx, data, 'pdf.js');
+        try {
+            out.rows = await ctx.parseLocalDoc(pdf);
+        } catch (e) {
+            out.error = e;
+            out.rows = [];
+        } finally {
+            if (pdf?.destroy) await pdf.destroy();
+        }
+        if (out.rows.length && !ctx.reconcile(out.rows).length) return out;
+    }
+    const fake = await openPdf(ctx, data, 'pdfium');
+    let alt = [];
+    try {
+        alt = await ctx.parseLocalDoc(fake);
+    } finally {
+        if (fake?.destroy) fake.destroy();
+    }
+    if (alt.length && (prefer === 'pdfium' || !out.rows.length || ctx._isBetterEngine(alt, out.rows))) {
+        out.rows = alt;
+        out.engine = 'pdfium';
+    }
+    if (!out.rows.length && out.error) throw out.error;
+    return out;
 }
 
 async function runBaselineCase(name, want, html) {
     const ctx = loadTool(html);
     const data = new Uint8Array(await readFile(new URL(want.file, import.meta.url)));
-    const pdf = await openPdf(ctx, data, want.engine);
+    const used = await parseBest(ctx, data, want.prefer || 'pdf.js');
 
-    let rows, agencyCheck = null, agencyPages = 0;
-    try {
-        rows = await ctx.parseLocalDoc(pdf);
+    let rows = used.rows, agencyCheck = null, agencyPages = 0;
+    {
         // 工作計畫核對：拿同一本預算書的「歲出機關別預算表」當外部基準，驗工作計畫的
         // 編號、名稱與本年度預算數。四層加總驗算只證明本表自己前後一致（頂端的工作計畫
         // 預算數就取自本表自身），這條才驗得到那個頂端數字。
-        const ag = await ctx.parseAgencyPlanTable(pdf);
-        agencyPages = ag.pages;
-        if (ag.pages) agencyCheck = ctx.crossCheckAgencyPlans(rows, ag);
-    } finally {
-        if (pdf?.destroy) await pdf.destroy();
+        const pdf = await openPdf(ctx, data, used.engine);
+        try {
+            const ag = await ctx.parseAgencyPlanTable(pdf);
+            agencyPages = ag.pages;
+            if (ag.pages) agencyCheck = ctx.crossCheckAgencyPlans(rows, ag);
+        } finally {
+            if (pdf?.destroy) await pdf.destroy();
+        }
     }
 
     const got = {
@@ -260,9 +312,12 @@ async function runBaselineCase(name, want, html) {
 
     const errors = [];
     for (const [key, expected] of Object.entries(want)) {
-        if (key === 'file' || key === 'engine' || key === 'extra' || key === 'agencyTable') continue;
+        if (key === 'file' || key === 'engine' || key === 'prefer' || key === 'extra' || key === 'agencyTable') continue;
         addMismatch(errors, key, expected, got[key]);
     }
+    // 引擎選擇本身也是行為：Big5 內文字型的文件現在應該由 pdf.js（帶 CMap）讀完，
+    // 而不是像以前一樣整份丟給較弱的 PDFium。
+    if (want.engine) addMismatch(errors, '實際使用的引擎', want.engine, used.engine);
 
     // 工作計畫核對的期望值刻意記「目前實際數」而非 0：11 筆不符是真實存在的問題
     // （6 筆概況表 planName 被截斷、5 筆本年度預算數與機關別表對不上，後者需翻 PDF 判斷
@@ -305,19 +360,21 @@ async function runBaselineCase(name, want, html) {
 async function runSocialCase(html) {
     const ctx = loadTool(html);
     const data = new Uint8Array(await readFile(new URL(SOCIAL_CASE.file, import.meta.url)));
-    const pdf = await openPdf(ctx, data);
+    const used = await parseBest(ctx, data);
 
-    let rows, agencyCheck = null, agencyPages = 0;
-    try {
-        rows = await ctx.parseLocalDoc(pdf);
+    let rows = used.rows, agencyCheck = null, agencyPages = 0;
+    {
         // 工作計畫核對：拿同一本預算書的「歲出機關別預算表」當外部基準，驗工作計畫的
         // 編號、名稱與本年度預算數。四層加總驗算只證明本表自己前後一致（頂端的工作計畫
         // 預算數就取自本表自身），這條才驗得到那個頂端數字。
-        const ag = await ctx.parseAgencyPlanTable(pdf);
-        agencyPages = ag.pages;
-        if (ag.pages) agencyCheck = ctx.crossCheckAgencyPlans(rows, ag);
-    } finally {
-        if (pdf?.destroy) await pdf.destroy();
+        const pdf = await openPdf(ctx, data, used.engine);
+        try {
+            const ag = await ctx.parseAgencyPlanTable(pdf);
+            agencyPages = ag.pages;
+            if (ag.pages) agencyCheck = ctx.crossCheckAgencyPlans(rows, ag);
+        } finally {
+            if (pdf?.destroy) await pdf.destroy();
+        }
     }
 
     const errors = [];
@@ -472,6 +529,29 @@ async function runSocialCase(html) {
     };
 }
 
+// PDFium 後備路徑的獨立回歸：CMap 或 CDN 被擋掉時，工具會（也必須）退回 PDFium。
+// 這條不經過引擎評分，強制走 PDFium，確認後備引擎仍然讀得完、算得平。
+async function runFallbackCase(html) {
+    const ctx = loadTool(html);
+    const data = new Uint8Array(await readFile(new URL('examples/kaohsiung-115.pdf', import.meta.url)));
+    const used = await parseBest(ctx, data, 'pdfium');
+    const errors = [];
+    addMismatch(errors, '後備引擎', 'pdfium', used.engine);
+    addMismatch(errors, '後備引擎列數', 220, used.rows.length);
+    errors.push(...ctx.reconcile(used.rows).map(i => '後備引擎驗算不符 → ' + issueText(i)));
+    const pdf = await openPdf(ctx, data, 'pdfium');
+    try {
+        const ag = await ctx.parseAgencyPlanTable(pdf);
+        const cc = ag.pages ? ctx.crossCheckAgencyPlans(used.rows, ag) : null;
+        addMismatch(errors, '後備引擎機關別表頁數', 1, ag.pages);
+        addMismatch(errors, '後備引擎工作計畫核對數', 4, cc ? cc.checked : 0);
+        addMismatch(errors, '後備引擎工作計畫不符數', 0, cc ? cc.issues.length : -1);
+    } finally {
+        if (pdf?.destroy) await pdf.destroy();
+    }
+    return { errors, rows: used.rows.length };
+}
+
 const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
 let failed = 0;
 
@@ -498,6 +578,21 @@ for (const [name, want] of Object.entries(EXPECT)) {
         console.error(`✗ ${name}`);
         console.error('    測試執行失敗：' + (error?.stack || error));
     }
+}
+
+try {
+    const { errors, rows } = await runFallbackCase(html);
+    if (errors.length) {
+        failed++;
+        console.error('✗ PDFium 後備路徑（高雄市）');
+        errors.slice(0, 10).forEach(error => console.error('    ' + error));
+    } else {
+        console.log(`✓ PDFium 後備路徑（高雄市）  強制走 PDFium 仍得 ${rows} 列｜四層驗算0不符｜工作計畫核對 4/4`);
+    }
+} catch (error) {
+    failed++;
+    console.error('✗ PDFium 後備路徑（高雄市）');
+    console.error('    測試執行失敗：' + (error?.stack || error));
 }
 
 if (await fileExists(SOCIAL_CASE.file)) {
@@ -580,6 +675,53 @@ if (await fileExists(SOCIAL_CASE.file)) {
         console.error(`✗ _parse 沒有遞增世代編號（${before} → ${after}）`);
     } else {
         console.log('✓ _parse 每次呼叫都會遞增世代編號（舊結果會被丟棄）');
+    }
+
+    // CMap 是「Big5 內文字型讀不讀得出來」的關鍵：index.html 必須把它指向 repo 內
+    // 自帶的同源 cmaps/，而那個資料夾必須真的有樣本需要的字元對應表。
+    // 少了任何一邊，三份 2-byte CID 的文件就會退回較弱的 PDFium（或整個讀不出來）。
+    const cmapCtx = loadTool(html);
+    const cmapUrl = vm.runInContext('_CMAP_URL', cmapCtx);
+    if (cmapUrl !== 'http://127.0.0.1:8963/cmaps/') {
+        failed++;
+        console.error(`✗ _CMAP_URL 不是同源的 cmaps/（實際 ${cmapUrl}）`);
+    } else if (!/cMapUrl:\s*_CMAP_URL/.test(html) || !/cMapPacked:\s*true/.test(html)) {
+        failed++;
+        console.error('✗ getDocument 沒有帶 cMapUrl/cMapPacked');
+    } else {
+        console.log('✓ CMap 指向同源 cmaps/，且 getDocument 有帶 cMapUrl + cMapPacked');
+    }
+    // 這五個是現有 7 份樣本實際讀取的字元對應表（其餘 160 幾個同批自帶，供其他 CJK 文件用）
+    const needMaps = ['Adobe-CNS1-UCS2.bcmap', 'UniCNS-UCS2-H.bcmap', 'ETen-B5-H.bcmap',
+        'ETenms-B5-H.bcmap', 'UniCNS-UTF16-H.bcmap'];
+    const missingMaps = needMaps.filter(f => !existsSync(new URL('cmaps/' + f, import.meta.url)));
+    if (missingMaps.length) {
+        failed++;
+        console.error(`✗ cmaps/ 缺少樣本需要的字元對應表：${missingMaps.join('、')}`);
+    } else {
+        console.log(`✓ cmaps/ 自帶 ${needMaps.length} 個樣本需要的字元對應表（Big5/CNS）`);
+    }
+
+    // 引擎評分的規則（哪個引擎的結果該留下）必須是「先能自圓其說、再比資料量」。
+    // 這條規則同時決定瀏覽器與 PDFium 後備路徑的行為，所以直接驗語意。
+    const rank = loadTool(html);
+    const good = [
+        { level: '用途別一級', planCode: 'P', branchCode: '01', l1Code: '1000', amount: '100' },
+        { level: '明細', planCode: 'P', branchCode: '01', l1Code: '1000', l2Code: '1001', amount: '100' },
+    ];
+    const bad = [
+        { level: '用途別一級', planCode: 'P', branchCode: '01', l1Code: '1000', amount: '100' },
+        { level: '明細', planCode: 'P', branchCode: '01', l1Code: '1000', l2Code: '1001', amount: '60' },
+    ];
+    const goodMore = good.concat([{ level: '明細', planCode: 'P', branchCode: '01', l1Code: '1000', l2Code: '1001', amount: '0' }]);
+    const better = rank._isBetterEngine;
+    if (!(better(good, bad) === true && better(bad, good) === false
+        && better(goodMore, good) === true && better(good, goodMore) === false
+        && better([], good) === false && better(good, []) === true)) {
+        failed++;
+        console.error('✗ 引擎評分規則不是「先比驗算相符、再比列數」');
+    } else {
+        console.log('✓ 引擎評分規則：先比四層驗算相符數，再比列數（空的永遠不贏）');
     }
 
     // 保守式修復的 DFS 必須有節點上限：病態輸入不能把分頁卡住。
