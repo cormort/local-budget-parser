@@ -770,7 +770,9 @@
     async function parseLocalDoc(pdf, onProgress) {
       const out = [];
       let plan = null, br = null, l1 = null, acct = null, totalMode = false;
-      _unitAgency = '';
+      // 機關名先存在區域變數、結尾才寫回全域：解析中途有 await，連點兩份檔案時
+      // 另一趟解析會插進來，逐頁直接寫 _unitAgency 會混出別份檔案的機關名。
+      let agency = '';
       
       for (let i = 1; i <= pdf.numPages; i++) {
         if (onProgress) onProgress(i, pdf.numPages);
@@ -787,10 +789,10 @@
         const rows0 = _groupRows(ws);
         const texts0 = rows0.map(r => _strip(r.ws.map(w => w.s).join('')));
         
-        if (!_unitAgency) {
+        if (!agency) {
           const bi = texts0.findIndex(t => t.includes(_LOCAL_TITLE));
           if (bi > 0 && /^[一-鿿－]{2,30}$/.test(texts0[bi - 1])) {
-            _unitAgency = texts0[bi - 1];
+            agency = texts0[bi - 1];
           }
         }
         
@@ -1001,6 +1003,7 @@
 
       _attachTotalCostTooltips(out);
       _repairDetailAmounts(out);
+      _unitAgency = agency;
       return out;
     }
     
@@ -1400,6 +1403,25 @@
       return a[1] < b[1];
     }
 
+    // 同一份 doc 會被逐頁讀兩趟（明細表、機關別預算表），getTextContent 是最貴的一步，
+    // 以 doc 為鍵快取每頁結果；doc 釋放後 WeakMap 自動回收。
+    const _textCache = {
+      m: new WeakMap(),
+      wrap(doc) {
+        if (!this.m.has(doc)) this.m.set(doc, new Map());
+        const pages = this.m.get(doc);
+        return {
+          numPages: doc.numPages,
+          getPage: async no => ({
+            getTextContent: async () => {
+              if (!pages.has(no)) pages.set(no, (await doc.getPage(no)).getTextContent());
+              return pages.get(no);
+            }
+          })
+        };
+      }
+    };
+
     async function _parse(data) {
       const msg = document.getElementById('msg');
       const token = ++_parseToken;
@@ -1412,12 +1434,12 @@
         pdf = await pdfjsLib.getDocument({ data, cMapUrl: _CMAP_URL, cMapPacked: true }).promise;
         let rows = [], pdfjsError = null;
         try {
-          rows = await parseLocalDoc(pdf, (i, n) => { if (!stale()) msg.textContent = `解析中… ${i}/${n}`; });
+          rows = await parseLocalDoc(_textCache.wrap(pdf), (i, n) => { if (!stale()) msg.textContent = `解析中… ${i}/${n}`; });
         } catch (e) {
           pdfjsError = e;    // 讀到一半炸掉也要讓 PDFium 有機會接手，不能直接放棄整個檔案
         }
         let engine = 'pdf.js', doc = pdf;
-        let repairs = _repairs, repairNotes = _repairNotes;
+        let repairs = _repairs, repairNotes = _repairNotes, unitAgency = _unitAgency;
 
         // 退回 PDFium 的時機有三個：pdf.js 完全讀不出東西、讀到一半例外、或是讀出來的東西
         // 自己對不上（四層驗算不符＝有金額被分錯層或漏讀）。最後一種原本不會退，
@@ -1427,10 +1449,10 @@
           try {
             const lib = await _loadPdfium();
             fake = _pdfiumFakeDoc(lib, data);
-            const altRows = await parseLocalDoc(fake, (i, n) => { if (!stale()) msg.textContent = `PDFium 解析中… ${i}/${n}`; });
+            const altRows = await parseLocalDoc(_textCache.wrap(fake), (i, n) => { if (!stale()) msg.textContent = `PDFium 解析中… ${i}/${n}`; });
             if (altRows.length && _isBetterEngine(altRows, rows)) {
               rows = altRows; doc = fake; engine = 'PDFium';
-              repairs = _repairs; repairNotes = _repairNotes;
+              repairs = _repairs; repairNotes = _repairNotes; unitAgency = _unitAgency;
             } else {
               _repairs = repairs; _repairNotes = repairNotes;   // 保留 pdf.js 的修復紀錄
               try { if (fake.destroy) fake.destroy(); } catch (err) { /* 已經釋放過 */ }
@@ -1451,14 +1473,16 @@
         // 工作計畫核對要用「解析成功的那個引擎」的同一份 doc，故在 destroy 之前跑
         let agencyCheck = null;
         const ag = rows.length
-          ? await parseAgencyPlanTable(doc, (i, n) => { if (!stale()) msg.textContent = `核對歲出機關別預算表 ${i}/${n}…`; })
+          ? await parseAgencyPlanTable(_textCache.wrap(doc), (i, n) => { if (!stale()) msg.textContent = `核對歲出機關別預算表 ${i}/${n}…`; })
           : { map: new Map(), pages: 0 };
         agencyCheck = ag.pages ? crossCheckAgencyPlans(rows, ag) : null;
 
         if (stale()) return;                    // 已經有新的解析在跑，這次結果直接丟棄
         if (!rows.length) throw Error('找不到可解析的費用明細表');
 
+        // 全域可能已被 PDFium 複核或另一趟解析改寫，一律以本趟快照為準
         _rows = rows;
+        _repairs = repairs; _repairNotes = repairNotes; _unitAgency = unitAgency;
         _agencyCheck = agencyCheck;
         _filter.plan = _filter.branch = _filter.acct = _filter.level = _filter.q = '';
         document.getElementById('exportBtns').style.display = '';
@@ -1581,7 +1605,7 @@
         // 對不到的計畫要單獨講清楚：它們的金額「沒有第二個來源可驗」，不是驗過了沒問題。
         // 把「已核對 N/M」寫在通過訊息裡還不夠——使用者會直接把綠色的✅讀成全部都驗過。
         if (c.unmatched.length) {
-          const li = c.unmatched.map(x => `${esc(x.code)} ${esc(x.name)}：${_fmt(+x.budget)} 元`).join('<br>');
+          const li = c.unmatched.map(x => `${esc(x.code)} ${esc(x.name)}：${x.budget ? _fmt(+x.budget) + ' 元' : '（未抽到金額）'}`).join('<br>');
           reconLine += `<div class="recon bad" style="border-left-color:#fd7e14;background:#fff8f0;">`
             + `⚠ 有 ${c.unmatched.length} 個工作計畫在歲出機關別預算表中找不到對應編號，`
             + `<strong>這些計畫的本年度預算數未經外部核對</strong>，請自行回對 PDF：<br>${li}`
@@ -1724,7 +1748,7 @@
         content = '\ufeff' + [head, ...view.map(arr)].map(r => r.map(q).join(',')).join('\r\n');
         mime = 'text/csv;charset=utf-8';
       } else {
-        content = JSON.stringify(view.map(r => Object.fromEntries(head.map((h, i) => [h, arr(r)[i]]))), null, 2);
+        content = JSON.stringify(view.map(r => { const v = arr(r); return Object.fromEntries(head.map((h, i) => [h, v[i]])); }), null, 2);
         mime = 'application/json';
       }
       download(content, fname + '.' + kind, mime);
