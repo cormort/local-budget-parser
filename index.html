@@ -1422,10 +1422,18 @@
       }
     };
 
+    // 上一次提交到畫面的結果。過期的解析仍會跑完 parseLocalDoc 並改寫全域
+    // （_repairs／_unitAgency），丟棄時要還原成這份，否則匯出會帶到別份檔案的修復紀錄。
+    let _committed = { repairs: [], repairNotes: [], unitAgency: '' };
+
     async function _parse(data) {
       const msg = document.getElementById('msg');
       const token = ++_parseToken;
-      const stale = () => token !== _parseToken;
+      const stale = () => {
+        if (token === _parseToken) return false;
+        ({ repairs: _repairs, repairNotes: _repairNotes, unitAgency: _unitAgency } = _committed);
+        return true;
+      };
       msg.textContent = '解析中…';
       let pdf = null, fake = null;
       try {
@@ -1434,7 +1442,7 @@
         pdf = await pdfjsLib.getDocument({ data, cMapUrl: _CMAP_URL, cMapPacked: true }).promise;
         let rows = [], pdfjsError = null;
         try {
-          rows = await parseLocalDoc(_textCache.wrap(pdf), (i, n) => { if (!stale()) msg.textContent = `解析中… ${i}/${n}`; });
+          rows = await parseLocalDoc(_textCache.wrap(pdf), (i, n) => { if (token === _parseToken) msg.textContent = `解析中… ${i}/${n}`; });
         } catch (e) {
           pdfjsError = e;    // 讀到一半炸掉也要讓 PDFium 有機會接手，不能直接放棄整個檔案
         }
@@ -1449,7 +1457,7 @@
           try {
             const lib = await _loadPdfium();
             fake = _pdfiumFakeDoc(lib, data);
-            const altRows = await parseLocalDoc(_textCache.wrap(fake), (i, n) => { if (!stale()) msg.textContent = `PDFium 解析中… ${i}/${n}`; });
+            const altRows = await parseLocalDoc(_textCache.wrap(fake), (i, n) => { if (token === _parseToken) msg.textContent = `PDFium 解析中… ${i}/${n}`; });
             if (altRows.length && _isBetterEngine(altRows, rows)) {
               rows = altRows; doc = fake; engine = 'PDFium';
               repairs = _repairs; repairNotes = _repairNotes; unitAgency = _unitAgency;
@@ -1473,7 +1481,7 @@
         // 工作計畫核對要用「解析成功的那個引擎」的同一份 doc，故在 destroy 之前跑
         let agencyCheck = null;
         const ag = rows.length
-          ? await parseAgencyPlanTable(_textCache.wrap(doc), (i, n) => { if (!stale()) msg.textContent = `核對歲出機關別預算表 ${i}/${n}…`; })
+          ? await parseAgencyPlanTable(_textCache.wrap(doc), (i, n) => { if (token === _parseToken) msg.textContent = `核對歲出機關別預算表 ${i}/${n}…`; })
           : { map: new Map(), pages: 0 };
         agencyCheck = ag.pages ? crossCheckAgencyPlans(rows, ag) : null;
 
@@ -1483,6 +1491,7 @@
         // 全域可能已被 PDFium 複核或另一趟解析改寫，一律以本趟快照為準
         _rows = rows;
         _repairs = repairs; _repairNotes = repairNotes; _unitAgency = unitAgency;
+        _committed = { repairs, repairNotes, unitAgency };
         _agencyCheck = agencyCheck;
         _filter.plan = _filter.branch = _filter.acct = _filter.level = _filter.q = '';
         document.getElementById('exportBtns').style.display = '';
