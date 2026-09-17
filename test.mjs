@@ -154,6 +154,7 @@ function loadTool(html) {
             getElementById: () => stub,
             createElement: () => ({ ...stub }),
             querySelector: () => null,
+            querySelectorAll: () => [],
         },
         window: {},
         pdfjsLib: { GlobalWorkerOptions: {} },
@@ -526,6 +527,80 @@ if (await fileExists(SOCIAL_CASE.file)) {
     }
 } else {
     console.warn(`△ 略過${SOCIAL_CASE.name}：尚未找到 ${SOCIAL_CASE.file}`);
+}
+
+// ── 工程面契約（不涉及解析規則，但都是實際壞過或會壞的地方）──
+{
+    const html = await readFile('index.html', 'utf8');
+
+    const sri = (src) => {
+        const tag = html.match(new RegExp(`<script[^>]*${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^>]*>`, 'i'));
+        return tag ? { integrity: /integrity="sha384-[^"]+"/.test(tag[0]), crossorigin: /crossorigin=/.test(tag[0]) } : null;
+    };
+    const pdfSri = sri('pdf.js/2.10.377/pdf.min.js');
+    const xlsxSri = sri('xlsx/0.18.5/xlsx.full.min.js');
+    if (!pdfSri || !pdfSri.integrity || !pdfSri.crossorigin
+        || !xlsxSri || !xlsxSri.integrity || !xlsxSri.crossorigin) {
+        failed++;
+        console.error('✗ CDN 程式庫缺少 SRI/crossorigin（供應鏈硬化）');
+        console.error(`    pdf.js=${JSON.stringify(pdfSri)} xlsx=${JSON.stringify(xlsxSri)}`);
+    } else {
+        console.log('✓ CDN 程式庫都有 SRI + crossorigin');
+    }
+
+    if (!/<span id="msg" role="status" aria-live="polite">/.test(html) || !/for="f"/.test(html)) {
+        failed++;
+        console.error('✗ 進度訊息缺少 aria-live 或檔案輸入缺少 label');
+    } else {
+        console.log('✓ 進度訊息有 aria-live、檔案輸入有 label（螢幕報讀器可讀）');
+    }
+
+    // _parse 必須釋放 pdf.js 文件：舊版只 destroy PDFium 的偽文件，pdf.js 的 document
+    // 會一直留在記憶體（4.6MB／341 頁的預算書連續解析會累積）。
+    const ctx = loadTool(html);
+    let destroyed = 0;
+    const fakeDoc = {
+        numPages: 1,
+        getPage: async () => ({ getTextContent: async () => ({ items: [] }) }),
+        destroy: async () => { destroyed++; },
+    };
+    ctx.pdfjsLib = { GlobalWorkerOptions: {}, getDocument: () => ({ promise: Promise.resolve(fakeDoc) }) };
+    ctx.importModule = null;
+    const before = vm.runInContext('_parseToken', ctx);
+    await ctx._parse(new Uint8Array([1, 2, 3])).catch(() => {});
+    const after = vm.runInContext('_parseToken', ctx);
+    if (destroyed < 1) {
+        failed++;
+        console.error('✗ _parse 沒有釋放 pdf.js document（destroy 未被呼叫）');
+    } else {
+        console.log('✓ _parse 會釋放 pdf.js document（destroy 已呼叫）');
+    }
+    if (after !== before + 1) {
+        failed++;
+        console.error(`✗ _parse 沒有遞增世代編號（${before} → ${after}）`);
+    } else {
+        console.log('✓ _parse 每次呼叫都會遞增世代編號（舊結果會被丟棄）');
+    }
+
+    // 保守式修復的 DFS 必須有節點上限：病態輸入不能把分頁卡住。
+    const ctx2 = loadTool(html);
+    // 每列 123456 都能切成 4 種金額（123456／23456／3456／456），20 列就是 4^20 ≈ 1.1e12
+    // 種組合；目標訂在總和以下、又大到剪枝幾乎不會生效，藉此逼出節點上限。
+    const acct = { level: '用途別一級', amount: '2000000', planName: 'P', branchName: 'B', l1Code: '1000', l1Name: '人事費', page: 1 };
+    const details = Array.from({ length: 20 }, (_, i) => ({
+        level: '明細', amount: '123456', price: '', planName: 'P', branchName: 'B',
+        l2Code: '1001', l2Name: '約聘僱人員待遇', page: i + 2, desc: 'x',
+    }));
+    const t0 = Date.now();
+    ctx2._repairDetailAmounts([acct, ...details]);
+    const ms = Date.now() - t0;
+    const notes = vm.runInContext('_repairNotes', ctx2);
+    if (notes.length !== 1 || ms > 2000) {
+        failed++;
+        console.error(`✗ 修復 DFS 沒有正確套用節點上限（notes=${notes.length}、耗時 ${ms}ms）`);
+    } else {
+        console.log(`✓ 修復 DFS 有節點上限：病態輸入 ${ms}ms 內放棄並記錄 ${notes.length} 筆未修復`);
+    }
 }
 
 if (failed) {

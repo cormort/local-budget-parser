@@ -272,20 +272,22 @@
     
     <div class="warn">
       <strong>⚠ 本工具僅供輔助核對，不能取代人工審閱，一切數據以政府公布的預算書PDF原文為準。</strong><br>
-      總工程費／總經費改以案別本年度金額旁的紫色ⓘ提示呈現，不另占資料列，也不納入本年度合計及四層驗算。
+      總工程費／總經費改以案別本年度金額旁的紫色ⓘ提示呈現，不另占資料列，也不納入本年度合計及四層驗算。<br>
+      本頁使用 Google Analytics 統計使用量（不含檔名與內容）；PDF 只在你的瀏覽器本機解析，不會上傳。
     </div>
     
     <div class="card">
       <div class="controls">
-        <input type="file" id="f" accept=".pdf">
-        <button class="btn-main" onclick="run()">解析</button>
+        <label class="small" for="f">選擇預算書 PDF：</label>
+        <input type="file" id="f" accept=".pdf" aria-describedby="msg">
+        <button class="btn-main" id="parseBtn" type="button" onclick="run()">解析</button>
         <span id="exportBtns" style="display:none">
           <button class="btn-exp" onclick="exportData('xlsx')">匯出 xlsx</button>
           <button class="btn-exp" onclick="exportData('csv')">匯出 csv</button>
           <button class="btn-exp" onclick="exportData('json')">匯出 json</button>
           <button class="btn-exp" onclick="exportIssues()">匯出驗算差異</button>
         </span>
-        <span id="msg"></span>
+        <span id="msg" role="status" aria-live="polite"></span>
       </div>
       
       <div class="controls" style="margin-top:10px">
@@ -303,8 +305,14 @@
     </div>
   </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- 兩支外部程式庫都加上 SRI（integrity）+ crossorigin：CDN 被換內容時瀏覽器會直接拒絕執行，
+       而不是照跑被動過手腳的程式。workerSrc 只吃 URL，無法套 SRI，因此 pdf.js 本身仍要驗。 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.min.js"
+          integrity="sha384-RPl3/z3fjdXhY+fi+x3Ai8ri9BnaFQ2tIZn+wJ4pNmFqp/KvdiIcqMESTEY2MdUz"
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"
+          integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw"
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script>
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js';
     
@@ -998,8 +1006,11 @@
     
     // 修正三：若同科目明細加總大於表列數，僅對「單價空白」且金額疑似與數量黏連的列，
     // 嘗試移除金額最左側 1~3 碼。只有找到唯一且可讓整組精確等於科目表列數的組合才採用。
+    let _repairNotes = [];   // 因節點上限而未修復的科目（要讓使用者知道「這裡沒自動處理」）
+
     function _repairDetailAmounts(rows) {
       _repairs = [];
+      _repairNotes = [];
       let cur = null, details = [];
       
       const close = () => {
@@ -1022,8 +1033,16 @@
         });
         
         let solution = null, count = 0;
-        
+
+        // 候選值是「每列最多 4 個」，列數一多就是 4^n 的組合。實務上 total > target 的剪枝
+        // 很有效，但病態輸入（金額都很小、目標很大）仍可能掃到上百萬個組合並卡住主執行緒
+        // ——這裡加上節點上限，超過就放棄這一組修復（寧可少修，也不要讓畫面凍住）。
+        const MAX_NODES = 200000;
+        let nodes = 0, overflow = false;
+
         function dfs(idx, vals, total) {
+          if (overflow || count > 1) return;
+          if (++nodes > MAX_NODES) { overflow = true; return; }
           if (total > target) return;
           if (idx === details.length) {
             if (total === target) {
@@ -1036,12 +1055,23 @@
             vals.push(v);
             dfs(idx + 1, vals, total + v);
             vals.pop();
-            if (count > 1) return;
+            if (overflow || count > 1) return;
           }
         }
-        
+
         dfs(0, [], 0);
-        
+
+        if (overflow) {
+          _repairNotes.push({
+            page: cur.page,
+            plan: cur.planName,
+            branch: cur.branchName,
+            code: cur.l2Code || cur.l1Code,
+            name: cur.l2Name || cur.l1Name,
+            reason: `組合數超過 ${MAX_NODES} 個節點，已略過自動修復（請人工核對這一組明細）`,
+          });
+        }
+
         if (count === 1 && solution) {
           details.forEach((r, i) => {
             const old = _num(r.amount);
@@ -1338,43 +1368,66 @@
       }
       await _parse(new Uint8Array(await el.files[0].arrayBuffer()));
     }
-    
+
+    // 解析中的世代編號：使用者連按兩次、或解析到一半改點別的範例時，
+    // 舊的那次結果不能蓋掉新的（原本會互相覆寫 _rows，畫面出現混血結果）。
+    let _parseToken = 0;
+
+    function _setBusy(busy) {
+      const btn = document.getElementById('parseBtn');
+      if (btn) { btn.disabled = busy; btn.textContent = busy ? '解析中…' : '解析'; }
+      document.querySelectorAll('.btn-sec').forEach(b => { b.disabled = busy; });
+    }
+
     async function _parse(data) {
       const msg = document.getElementById('msg');
+      const token = ++_parseToken;
+      const stale = () => token !== _parseToken;
       msg.textContent = '解析中…';
+      let pdf = null, fake = null;
       try {
-        const pdf = await pdfjsLib.getDocument({ data }).promise;
-        _rows = await parseLocalDoc(pdf, (i, n) => msg.textContent = `解析中… ${i}/${n}`);
-        let engine = 'pdf.js', doc = pdf, fake = null;
+        _setBusy(true);                         // 放在 try 內，出錯時才會走到 finally 的釋放
+        if (typeof pdfjsLib === 'undefined') throw Error('pdf.js 未載入（CDN 被封鎖或離線），請重新整理後再試');
+        pdf = await pdfjsLib.getDocument({ data }).promise;
+        let rows = await parseLocalDoc(pdf, (i, n) => { if (!stale()) msg.textContent = `解析中… ${i}/${n}`; });
+        let engine = 'pdf.js', doc = pdf;
 
-        if (!_rows.length) {
+        if (!rows.length) {
           msg.textContent = 'pdf.js 無法解讀，改用 PDFium…';
           const lib = await _loadPdfium();
           fake = _pdfiumFakeDoc(lib, data);
-          _rows = await parseLocalDoc(fake, (i, n) => msg.textContent = `PDFium 解析中… ${i}/${n}`);
+          rows = await parseLocalDoc(fake, (i, n) => { if (!stale()) msg.textContent = `PDFium 解析中… ${i}/${n}`; });
           doc = fake;
           engine = 'PDFium';
         }
 
+        if (stale()) return;                    // 使用者已改點別的檔案：不必再花一整趟跑機關別表
         // 工作計畫核對要用「解析成功的那個引擎」的同一份 doc，故在 destroy 之前跑
-        try {
-          const ag = _rows.length
-            ? await parseAgencyPlanTable(doc, (i, n) => msg.textContent = `核對歲出機關別預算表 ${i}/${n}…`)
-            : { map: new Map(), pages: 0 };
-          _agencyCheck = ag.pages ? crossCheckAgencyPlans(_rows, ag) : null;
-        } finally {
-          if (fake) fake.destroy();
-        }
+        let agencyCheck = null;
+        const ag = rows.length
+          ? await parseAgencyPlanTable(doc, (i, n) => { if (!stale()) msg.textContent = `核對歲出機關別預算表 ${i}/${n}…`; })
+          : { map: new Map(), pages: 0 };
+        agencyCheck = ag.pages ? crossCheckAgencyPlans(rows, ag) : null;
 
-        if (!_rows.length) throw Error('找不到可解析的費用明細表');
-        
+        if (stale()) return;                    // 已經有新的解析在跑，這次結果直接丟棄
+        if (!rows.length) throw Error('找不到可解析的費用明細表');
+
+        _rows = rows;
+        _agencyCheck = agencyCheck;
         _filter.plan = _filter.branch = _filter.acct = _filter.level = _filter.q = '';
         document.getElementById('exportBtns').style.display = '';
         msg.textContent = `完成：${_rows.length} 列（機關：${_unitAgency || '未偵測'}｜引擎：${engine}｜自動修復：${_repairs.length}筆）`;
         render();
       } catch (e) {
+        if (stale()) return;
         msg.textContent = '';
         document.getElementById('out').innerHTML = `<p class="bad">解析失敗：${esc(e.message)}</p>`;
+      } finally {
+        // 舊版只 destroy 了 PDFium 的偽文件，pdf.js 的 document 一直留著：
+        // 4.6MB／341 頁的預算書解析完仍占著記憶體與 worker，連續換檔案會累積。
+        try { if (fake) fake.destroy(); } catch (err) { /* 已經釋放過 */ }
+        try { if (pdf && typeof pdf.destroy === 'function') await pdf.destroy(); } catch (err) { /* 已經釋放過 */ }
+        if (!stale()) _setBusy(false);
       }
     }
     
@@ -1501,6 +1554,11 @@
 
       if (_repairs.length) {
         reconLine += `<p class="note">ℹ 已自動修復 ${_repairs.length} 筆疑似欄位黏連金額；匯出資料會保留「原始預算數」供複核。</p>`;
+      }
+      if (_repairNotes.length) {
+        const li = _repairNotes.map(x => `${esc(x.code)} ${esc(x.name)}（PDF 第 ${x.page} 頁）`).join('<br>');
+        reconLine += `<div class="recon" style="border-left-color:#fd7e14;background:#fff8f0;">`
+          + `⚠ 有 ${_repairNotes.length} 組明細的欄位黏連組合過多，<strong>未自動修復</strong>（不是已驗證正確）：<br>${li}</div>`;
       }
       
       const getOpts = (l, pick, vf, tf) => {
@@ -1631,6 +1689,7 @@
       
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ..._issues.map(arr)]), '驗算差異');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(_repairs), '自動修復');
+      if (_repairNotes.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(_repairNotes), '未自動修復');
       XLSX.writeFile(wb, '歲出解析驗算差異.xlsx');
     }
     
